@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="sv">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Kaare Consulting - Resultaträkning 2025</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family:
+                    "SF Pro Display",
+                    -apple-system,
+                    BlinkMacSystemFont,
+                    "Segoe UI",
+                    Roboto,
+                    sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 40px 20px;
+            }
+
+            .container {
+                max-width: 800px;
+                margin: 0 auto;
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 30px 60px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
+            }
+
+            .header {
+                background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+                color: white;
+                padding: 40px;
+                text-align: center;
+            }
+
+            .company-name {
+                font-size: 2.2rem;
+                font-weight: 700;
+                margin-bottom: 8px;
+                letter-spacing: -0.5px;
+            }
+
+            .document-title {
+                font-size: 1.2rem;
+                font-weight: 300;
+                opacity: 0.9;
+                margin-bottom: 15px;
+            }
+
+            .period {
+                font-size: 0.95rem;
+                opacity: 0.8;
+                background: rgba(255, 255, 255, 0.1);
+                padding: 8px 16px;
+                border-radius: 20px;
+                display: inline-block;
+            }
+
+            .content {
+                padding: 40px;
+            }
+
+            .section {
+                margin-bottom: 35px;
+            }
+
+            .section-title {
+                font-size: 1.3rem;
+                font-weight: 600;
+                color: #2c3e50;
+                margin-bottom: 20px;
+                padding-bottom: 8px;
+                border-bottom: 3px solid #3498db;
+                display: inline-block;
+            }
+
+            .account-line {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                padding: 8px 0;
+                border-bottom: 1px solid #ecf0f1;
+                transition: background-color 0.2s ease;
+            }
+
+            .account-line:hover {
+                background-color: #f8f9fa;
+            }
+
+            .account-line.has-value {
+                background-color: #e8f5e8;
+                font-weight: 500;
+            }
+
+            .account-info {
+                display: flex;
+                align-items: center;
+                gap: 12px;
+            }
+
+            .account-number {
+                background: #34495e;
+                color: white;
+                padding: 4px 8px;
+                border-radius: 6px;
+                font-size: 0.8rem;
+                font-weight: 600;
+                min-width: 45px;
+                text-align: center;
+            }
+
+            .account-name {
+                color: #2c3e50;
+                font-size: 0.95rem;
+            }
+
+            .amount {
+                font-weight: 600;
+                color: #27ae60;
+                font-size: 0.95rem;
+                text-align: right;
+                min-width: 100px;
+            }
+
+            .amount.zero {
+                color: #95a5a6;
+                font-weight: 400;
+            }
+
+            .total-line {
+                background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+                color: white;
+                padding: 15px 20px;
+                margin: 20px -20px 0 -20px;
+                border-radius: 10px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-weight: 600;
+                font-size: 1.1rem;
+            }
+
+            .net-income {
+                background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
+                color: white;
+                padding: 25px;
+                margin: 30px -40px -40px -40px;
+                text-align: center;
+                font-size: 1.4rem;
+                font-weight: 700;
+            }
+
+            .net-income .label {
+                font-size: 1rem;
+                font-weight: 400;
+                opacity: 0.9;
+                margin-bottom: 8px;
+            }
+
+            .verification-note {
+                background: #f8f9fa;
+                border-left: 4px solid #3498db;
+                padding: 15px 20px;
+                margin: 30px 0;
+                border-radius: 0 8px 8px 0;
+            }
+
+            .verification-note h4 {
+                color: #2c3e50;
+                margin-bottom: 8px;
+                font-size: 1rem;
+            }
+
+            .verification-note p {
+                color: #7f8c8d;
+                font-size: 0.9rem;
+                line-height: 1.4;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1 class="company-name">Kaare Consulting</h1>
+                <h2 class="document-title">Resultaträkning Juli 2025</h2>
+                <div class="period">2025-07-01 till 2025-07-31</div>
+            </div>
+
+            <div class="content">
+                <div class="verification-note">
+                    <h4>Juli 2025 - Månadresultat</h4>
+                    <p>
+                        Denna resultaträkning visar Juli 2025 aktivitet:
+                        Intersolia-faktura (12 500 SEK), Hostinger hosting
+                        (145,24 SEK) och Telenor mobil (398,40 SEK).
+                    </p>
+                </div>
+
+                <div class="section">
+                    <h3 class="section-title">Intäkter</h3>
+                    <div class="account-line has-value">
+                        <div class="account-info">
+                            <span class="account-number">3001</span>
+                            <span class="account-name"
+                                >Försäljning inom Sverige, 25% moms</span
+                            >
+                        </div>
+                        <span class="amount">12 500,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">3000</span>
+                            <span class="account-name"
+                                >Försäljning inom Sverige</span
+                            >
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">3002</span>
+                            <span class="account-name"
+                                >Försäljning inom Sverige, 12% moms</span
+                            >
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">3003</span>
+                            <span class="account-name"
+                                >Försäljning inom Sverige, 6% moms</span
+                            >
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">3004</span>
+                            <span class="account-name"
+                                >Försäljning inom Sverige, momsfri</span
+                            >
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="total-line">
+                        <span>Summa Intäkter</span>
+                        <span>12 500,00 SEK</span>
+                    </div>
+                </div>
+
+                <div class="section">
+                    <h3 class="section-title">Rörelsekostnader</h3>
+                    <div class="account-line has-value">
+                        <div class="account-info">
+                            <span class="account-number">5420</span>
+                            <span class="account-name">Programvaror</span>
+                        </div>
+                        <span class="amount">1 691,88 SEK</span>
+                    </div>
+                    <div class="account-line has-value">
+                        <div class="account-info">
+                            <span class="account-number">6212</span>
+                            <span class="account-name">Mobiltelefon</span>
+                        </div>
+                        <span class="amount">398,40 SEK</span>
+                    </div>
+                    <div class="account-line has-value">
+                        <div class="account-info">
+                            <span class="account-number">6540</span>
+                            <span class="account-name">IT-tjänster</span>
+                        </div>
+                        <span class="amount">145,24 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">5010</span>
+                            <span class="account-name">Lokalhyra</span>
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">6210</span>
+                            <span class="account-name">Telekommunikation</span>
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">6230</span>
+                            <span class="account-name">Datakommunikation</span>
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">6540</span>
+                            <span class="account-name">IT-tjänster</span>
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">6550</span>
+                            <span class="account-name">Konsultarvoden</span>
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="account-line">
+                        <div class="account-info">
+                            <span class="account-number">6570</span>
+                            <span class="account-name">Bankkostnader</span>
+                        </div>
+                        <span class="amount zero">0,00 SEK</span>
+                    </div>
+                    <div class="total-line">
+                        <span>Summa Kostnader</span>
+                        <span>2 235,52 SEK</span>
+                    </div>
+                </div>
+
+                <div class="net-income">
+                    <div class="label">JULI MÅNADRESULTAT</div>
+                    <div>10 264,48 SEK</div>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>

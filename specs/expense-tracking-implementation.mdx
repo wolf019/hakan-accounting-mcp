@@ -1,0 +1,534 @@
+# MCP Invoice Server - Expense Tracking Implementation Plan
+
+## Overview
+
+This document outlines the implementation plan for extending the existing MCP Invoice Server with comprehensive expense tracking, VAT management, and quarterly reporting capabilities. This will enable complete bookkeeping automation for Swedish enskild firma (sole proprietorship) businesses.
+
+## Current State
+
+✅ **Existing Features:**
+- Invoice creation and management
+- PDF generation with WeasyPrint
+- Customer database
+- MCP integration with Claude Desktop
+- SQLite database with invoices, customers, line_items tables
+
+## Implementation Goals
+
+### Phase 1: Core Expense Management
+- Add expense tracking with VAT calculations
+- Implement expense categories for Swedish tax compliance
+- Create expense data models and database schema
+- Build MCP tools for expense management
+
+### Phase 2: AI-Powered Automation
+- Receipt scanning and OCR processing
+- Automatic expense categorization
+- Smart date and amount extraction
+- Bank transaction import and parsing
+
+### Phase 3: Reconciliation & Reporting
+- Payment matching between invoices and bank transactions
+- VAT report generation for quarterly declarations
+- Cash flow analysis and business insights
+- Export capabilities for accounting software
+
+## Technical Specifications
+
+### Database Schema Extensions
+
+```sql
+-- Expenses table
+CREATE TABLE expenses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    description TEXT NOT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    vat_amount DECIMAL(10,2) DEFAULT 0,
+    vat_rate DECIMAL(5,4) DEFAULT 0.25,  -- Swedish VAT rate
+    category TEXT NOT NULL,
+    expense_date DATE NOT NULL,
+    receipt_image_path TEXT,
+    notes TEXT,
+    is_deductible BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Bank transactions table
+CREATE TABLE bank_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_date DATE NOT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    description TEXT,
+    reference TEXT,
+    counterparty TEXT,
+    transaction_type TEXT,  -- 'incoming', 'outgoing'
+    account_balance DECIMAL(10,2),
+    imported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Reconciliation table (links payments with invoices/expenses)
+CREATE TABLE reconciliations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id INTEGER,
+    expense_id INTEGER,
+    bank_transaction_id INTEGER,
+    reconciled_amount DECIMAL(10,2),
+    reconciled_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    reconciliation_type TEXT,  -- 'invoice_payment', 'expense_payment'
+    notes TEXT,
+    FOREIGN KEY (invoice_id) REFERENCES invoices (id),
+    FOREIGN KEY (expense_id) REFERENCES expenses (id),
+    FOREIGN KEY (bank_transaction_id) REFERENCES bank_transactions (id)
+);
+
+-- VAT periods table for tracking quarterly reports
+CREATE TABLE vat_periods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    year INTEGER NOT NULL,
+    quarter INTEGER NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    output_vat DECIMAL(10,2) DEFAULT 0,  -- VAT on sales
+    input_vat DECIMAL(10,2) DEFAULT 0,   -- VAT on purchases
+    net_vat DECIMAL(10,2) DEFAULT 0,     -- Amount to pay/receive
+    submitted_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(year, quarter)
+);
+```
+
+### Data Models
+
+```python
+# models.py extensions
+
+@dataclass
+class Expense:
+    id: Optional[int] = None
+    description: str
+    amount: Decimal
+    vat_amount: Decimal = Decimal("0")
+    vat_rate: Decimal = Decimal("0.25")
+    category: str
+    expense_date: date
+    receipt_image_path: Optional[str] = None
+    notes: Optional[str] = None
+    is_deductible: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+@dataclass
+class BankTransaction:
+    id: Optional[int] = None
+    transaction_date: date
+    amount: Decimal
+    description: Optional[str] = None
+    reference: Optional[str] = None
+    counterparty: Optional[str] = None
+    transaction_type: str  # 'incoming', 'outgoing'
+    account_balance: Optional[Decimal] = None
+    imported_at: Optional[datetime] = None
+
+@dataclass
+class Reconciliation:
+    id: Optional[int] = None
+    invoice_id: Optional[int] = None
+    expense_id: Optional[int] = None
+    bank_transaction_id: int
+    reconciled_amount: Decimal
+    reconciliation_type: str
+    notes: Optional[str] = None
+    reconciled_at: Optional[datetime] = None
+
+@dataclass
+class VATReport:
+    year: int
+    quarter: int
+    start_date: date
+    end_date: date
+    total_sales: Decimal
+    total_purchases: Decimal
+    output_vat: Decimal
+    input_vat: Decimal
+    net_vat: Decimal
+    invoice_count: int
+    expense_count: int
+```
+
+### Swedish Expense Categories
+
+```python
+EXPENSE_CATEGORIES = {
+    "office_supplies": "Kontorsmaterial",
+    "software": "Programvara och licenser", 
+    "hosting_cloud": "Hosting och molntjänster",
+    "travel": "Resor",
+    "meals_client": "Representation",
+    "education": "Utbildning och kurser",
+    "equipment": "Inventarier och utrustning",
+    "phone_internet": "Telefon och internet",
+    "insurance": "Försäkringar",
+    "accounting": "Bokföring och revision",
+    "marketing": "Marknadsföring",
+    "office_rent": "Kontorshyra",
+    "other": "Övrigt"
+}
+
+VAT_RATES = {
+    "standard": Decimal("0.25"),    # 25% - most goods/services
+    "reduced": Decimal("0.12"),     # 12% - food, hotels
+    "low": Decimal("0.06"),         # 6% - books, newspapers
+    "zero": Decimal("0.00"),        # 0% - exports, some services
+}
+```
+
+## MCP Tools Implementation
+
+### Core Expense Management Tools
+
+```python
+@mcp.tool()
+def add_expense(
+    description: str,
+    amount: float,
+    category: str,
+    expense_date: str,
+    vat_rate: float = 0.25,
+    notes: Optional[str] = None
+) -> str:
+    """
+    Add a new business expense with VAT calculation.
+    
+    Args:
+        description: What was purchased/paid for
+        amount: Total amount including VAT
+        category: Expense category (office_supplies, software, etc.)
+        expense_date: Date of expense (YYYY-MM-DD)
+        vat_rate: VAT rate (0.25 for 25%, 0.12 for 12%, etc.)
+        notes: Optional additional notes
+    
+    Returns:
+        Success message with expense ID and VAT details
+    """
+
+@mcp.tool()
+def scan_receipt(image_path: str) -> Dict[str, Any]:
+    """
+    Scan receipt image and extract expense data using OCR and AI.
+    
+    Args:
+        image_path: Path to receipt image file
+        
+    Returns:
+        Extracted expense data (description, amount, date, etc.)
+    """
+
+@mcp.tool()
+def import_bank_csv(csv_data: str, account_type: str = "swedbank") -> str:
+    """
+    Import bank transactions from CSV export.
+    
+    Args:
+        csv_data: CSV content from bank export
+        account_type: Bank type for parsing format (swedbank, seb, etc.)
+        
+    Returns:
+        Import summary with transaction count
+    """
+
+@mcp.tool()
+def reconcile_payment(
+    invoice_id: Optional[int] = None,
+    expense_id: Optional[int] = None,
+    bank_transaction_id: int,
+    amount: Optional[float] = None
+) -> str:
+    """
+    Match bank transaction with invoice payment or expense.
+    
+    Args:
+        invoice_id: Invoice that was paid (for incoming payments)
+        expense_id: Expense that was paid (for outgoing payments)  
+        bank_transaction_id: Bank transaction to match
+        amount: Override amount if partial payment
+        
+    Returns:
+        Reconciliation confirmation
+    """
+```
+
+### Reporting and Analysis Tools
+
+```python
+@mcp.tool()
+def generate_vat_report(quarter: int, year: int = 2025) -> str:
+    """
+    Generate VAT report for quarterly declaration to Skatteverket.
+    
+    Args:
+        quarter: Quarter number (1-4)
+        year: Year for report
+        
+    Returns:
+        VAT report summary with amounts for declaration
+    """
+
+@mcp.tool()
+def export_accounting_data(
+    start_date: str,
+    end_date: str,
+    format: str = "excel"
+) -> str:
+    """
+    Export accounting data for external bookkeeping software.
+    
+    Args:
+        start_date: Start date (YYYY-MM-DD)
+        end_date: End date (YYYY-MM-DD)
+        format: Export format (excel, csv, sie)
+        
+    Returns:
+        Export file path and summary
+    """
+
+@mcp.tool()
+def calculate_tax_deductions(year: int = 2025) -> str:
+    """
+    Calculate potential tax deductions for annual declaration.
+    
+    Args:
+        year: Tax year
+        
+    Returns:
+        Summary of deductible expenses by category
+    """
+```
+
+### Resource Endpoints
+
+```python
+@mcp.resource("expenses://list/{category?}")
+def list_expenses(category: Optional[str] = None) -> str:
+    """List expenses, optionally filtered by category"""
+
+@mcp.resource("expenses://quarter/{year}/{quarter}")
+def quarterly_expenses(year: int, quarter: int) -> str:
+    """Get expenses for specific quarter"""
+
+@mcp.resource("cashflow://monthly/{year}/{month}")
+def monthly_cashflow(year: int, month: int) -> str:
+    """Monthly cash flow analysis"""
+
+@mcp.resource("vat://report/{year}/{quarter}")
+def vat_report_data(year: int, quarter: int) -> str:
+    """VAT report data for specific quarter"""
+
+@mcp.resource("reconciliation://unmatched")
+def unmatched_transactions() -> str:
+    """List bank transactions not yet reconciled"""
+```
+
+## AI Processing Features
+
+### Receipt OCR and Data Extraction
+
+```python
+# receipt_processor.py
+class ReceiptProcessor:
+    def __init__(self):
+        self.ocr_engine = "pytesseract"  # or cloud OCR service
+        
+    def process_receipt(self, image_path: str) -> Dict[str, Any]:
+        """
+        Process receipt image and extract structured data.
+        
+        Returns:
+            {
+                "description": "ICA Maxi - Office supplies",
+                "amount": 347.50,
+                "vat_amount": 69.50,
+                "date": "2025-06-06",
+                "category": "office_supplies",
+                "merchant": "ICA Maxi",
+                "confidence": 0.95
+            }
+        """
+        
+    def categorize_expense(self, description: str) -> str:
+        """Use AI to categorize expense based on description."""
+        
+    def extract_vat_amount(self, total_amount: float, receipt_text: str) -> float:
+        """Extract VAT amount from receipt text."""
+```
+
+### Bank Transaction Processing
+
+```python
+# bank_processor.py
+class BankTransactionProcessor:
+    def parse_swedbank_csv(self, csv_content: str) -> List[BankTransaction]:
+        """Parse Swedbank CSV export format."""
+        
+    def parse_seb_csv(self, csv_content: str) -> List[BankTransaction]:
+        """Parse SEB CSV export format."""
+        
+    def smart_match_transactions(self) -> List[Dict]:
+        """
+        Automatically match transactions with invoices/expenses.
+        Uses fuzzy matching on amounts, dates, and descriptions.
+        """
+```
+
+## Dependencies to Add
+
+Update `pyproject.toml`:
+
+```toml
+[project]
+dependencies = [
+    # Existing dependencies...
+    "mcp>=1.0.0",
+    "weasyprint>=65.0", 
+    "jinja2>=3.1.0",
+    "pydantic>=2.0.0",
+    "fastapi>=0.100.0",
+    
+    # New dependencies for expense tracking
+    "pillow>=10.0.0",           # Image processing for receipts
+    "pandas>=2.0.0",            # CSV parsing & data analysis
+    "openpyxl>=3.1.0",          # Excel export for accountants
+    "python-dateutil>=2.8.0",   # Smart date parsing
+    "fuzzywuzzy>=0.18.0",       # Fuzzy matching for reconciliation
+    "python-levenshtein>=0.21.0", # Faster fuzzy matching
+    
+    # Optional OCR dependencies
+    "pytesseract>=0.3.10",      # OCR text extraction
+    "opencv-python>=4.8.0",     # Image preprocessing
+]
+
+[project.optional-dependencies]
+ocr = [
+    "pytesseract>=0.3.10",
+    "opencv-python>=4.8.0",
+]
+```
+
+## Report Templates
+
+### VAT Report Template
+
+Create `templates/vat_report.html.j2`:
+
+```html
+<!doctype html>
+<html>
+<head>
+    <meta charset="UTF-8" />
+    <title>VAT Report Q{{ quarter }} {{ year }}</title>
+</head>
+<body>
+    <header>
+        <h1>Momsdeklaration - Kvartal {{ quarter }} {{ year }}</h1>
+        <p>{{ company.name }}</p>
+        <p>Org.nr: {{ company.org_number }}</p>
+        <p>Momsreg.nr: {{ company.vat_number }}</p>
+    </header>
+    
+    <section class="vat-summary">
+        <h2>Sammanfattning</h2>
+        <table>
+            <tr>
+                <td>Utgående moms (försäljning):</td>
+                <td>{{ output_vat|format_currency }}</td>
+            </tr>
+            <tr>
+                <td>Ingående moms (inköp):</td>
+                <td>{{ input_vat|format_currency }}</td>
+            </tr>
+            <tr class="total">
+                <td><strong>Att betala:</strong></td>
+                <td><strong>{{ net_vat|format_currency }}</strong></td>
+            </tr>
+        </table>
+    </section>
+    
+    <section class="sales-detail">
+        <h2>Försäljning ({{ invoice_count }} fakturor)</h2>
+        <!-- Sales details -->
+    </section>
+    
+    <section class="expense-detail">
+        <h2>Inköp ({{ expense_count }} utgifter)</h2>
+        <!-- Expense details by category -->
+    </section>
+</body>
+</html>
+```
+
+## Implementation Priority
+
+### Phase 1 (Core) - **HIGH PRIORITY**
+1. ✅ Database schema expansion
+2. ✅ Basic expense data models  
+3. ✅ `add_expense` MCP tool
+4. ✅ Expense listing resources
+5. ✅ Basic VAT calculations
+
+### Phase 2 (Automation) - **MEDIUM PRIORITY**
+1. ✅ Bank CSV import functionality
+2. ✅ Transaction reconciliation tools
+3. ✅ VAT report generation
+4. ✅ Expense categorization AI
+
+### Phase 3 (Advanced) - **LOW PRIORITY**
+1. ✅ Receipt OCR scanning
+2. ✅ Advanced reconciliation algorithms  
+3. ✅ Export to accounting software
+4. ✅ Business intelligence dashboards
+
+## Success Criteria
+
+### Functional Requirements
+- ✅ Add expenses via natural language commands
+- ✅ Automatic VAT calculations for Swedish rates
+- ✅ Generate quarterly VAT reports in PDF format
+- ✅ Match bank transactions with invoices/expenses
+- ✅ Export data for external accounting tools
+
+### Performance Requirements
+- ✅ Handle 1000+ expenses per quarter
+- ✅ Generate reports in under 5 seconds
+- ✅ Process receipt images in under 10 seconds
+- ✅ Import bank CSV files with 100+ transactions
+
+### User Experience Requirements
+- ✅ Natural language interface via Claude Desktop
+- ✅ One-command quarterly reporting
+- ✅ Automatic expense categorization
+- ✅ Visual confirmation of reconciled transactions
+
+## Usage Examples
+
+### Adding Expenses
+```
+"Lägg till utgift: 1200 kr för Adobe Creative Suite igår"
+"Jag köpte kontorsmaterial för 450 kr på ICA, lägg till som utgift"
+"Skanna det här kvittot och lägg till som utgift"
+```
+
+### Financial Reporting  
+```
+"Generera momsrapport för Q2 2025"
+"Visa alla IT-utgifter för detta kvartal"
+"Hur mycket kan jag dra av i skatt i år?"
+```
+
+### Reconciliation
+```
+"Matcha faktura 2025-004 med bankinbetalningen från igår"
+"Vilka transaktioner är inte matchade än?"
+"Visa kassaflödet för maj"
+```
+
+This implementation will provide a complete business accounting solution integrated with the existing invoice system, enabling full automation of Swedish quarterly VAT declarations and expense management.

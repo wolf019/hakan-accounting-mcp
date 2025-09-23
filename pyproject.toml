@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-invoice-server"
+version = "0.2.0"
+description = "MCP server for unified accounting system with Swedish compliance"
+authors = [{name = "Tom Axberg", email = "consulting@tomkaare.tech"}]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "mcp>=1.0.0",
+    "weasyprint>=65.0",
+    "jinja2>=3.1.0",
+    "pydantic>=2.0.0",
+    "fastapi>=0.100.0",
+    # Accounting system dependencies
+    "pandas>=2.0.0",            # Data analysis and financial reporting
+    "openpyxl>=3.1.0",          # Excel export for accountants
+    "python-dateutil>=2.8.0",   # Smart date parsing
+    "fuzzywuzzy>=0.18.0",       # Fuzzy matching for reconciliation
+    "python-levenshtein>=0.21.0", # Faster fuzzy matching
+    # TOTP security dependencies
+    "pyotp>=2.9.0",             # TOTP/HOTP authentication
+    "qrcode>=7.4.0",            # QR code generation for authenticator setup
+]
+
+[project.scripts]
+mcp-invoice-server = "src.server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+ocr = [
+    "pytesseract>=0.3.10",      # OCR text extraction
+    "opencv-python>=4.8.0",     # Image preprocessing
+    "pillow>=10.0.0",           # Image processing for receipts
+]
+
+[project.urls]
+Homepage = "https://github.com/tomaxberg/mcp-invoice-server"
+Repository = "https://github.com/tomaxberg/mcp-invoice-server"
+Issues = "https://github.com/tomaxberg/mcp-invoice-server/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "ANN", "B", "C4", "ICN", "PIE", "T20", "RET", "SIM", "ARG", "PTH", "ERA", "PD", "PLE", "PLW", "TRY", "RUF"]
+ignore = ["ANN101", "ANN102", "ANN401"]
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["."]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+
+# MCP Invoice Server configuration
+[tool.mcp-invoice-server]
+# Swedish accounting compliance
+chart_of_accounts = "BAS_2022_IT_Consultant"
+default_vat_rate = 0.25
+currency = "SEK"
+fiscal_year_start = "01-01"
