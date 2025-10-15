@@ -46,7 +46,7 @@ supersede_voucher(
     original_voucher_id=21,
     replacement_voucher_id=22,
     reason="Balance error corrected",
-    user_id="tkaxberg@gmail.com",
+    user_id="your-email@example.com",
     totp_code="123456"  # Get this from Google Authenticator
 )
 ```
@@ -66,7 +66,7 @@ supersede_voucher(
     original_voucher_id=21,
     replacement_voucher_id=22,
     reason="Emergency correction",
-    user_id="tkaxberg@gmail.com",
+    user_id="your-email@example.com",
     totp_code="12345678"  # 8-digit backup code
 )
 ```
@@ -105,8 +105,8 @@ python src/totp_setup/setup_totp.py
 ## 📋 Files Created
 
 After setup, you'll have:
-- `~/Desktop/kaare_totp_qr_tkaxberg_gmail_com.png` - QR code for scanning
-- `~/Desktop/kaare_backup_codes_tkaxberg_gmail_com.txt` - Emergency backup codes
+- `~/Desktop/totp_qr_your-email@example.com.png` - QR code for scanning
+- `~/Desktop/backup_codes_your-email@example.com.txt` - Emergency backup codes
 - Database entries with encrypted TOTP configuration
 
 Remember to move these files to secure locations!
