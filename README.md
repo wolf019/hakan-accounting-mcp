@@ -40,8 +40,8 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "accounting-server": {
-      "command": "/Users/tomaxberg/MCPToolbox/mcp-accounting-server/.venv/bin/python3",
-      "args": ["/Users/tomaxberg/MCPToolbox/mcp-accounting-server/run_server.py"]
+      "command": "~/mcp-accounting-server/.venv/bin/python3",
+      "args": ["~/mcp-accounting-server/run_server.py"]
     }
   }
 }
