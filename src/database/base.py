@@ -13,18 +13,18 @@ class DatabaseManager:
         import os
         import sys
         import tempfile
-        
+
         if db_path is None:
             # Try different database locations in order of preference
             locations = [
                 # User home directory
                 os.path.join(os.path.expanduser("~"), ".mcp-accounting-server", "invoices.db"),
-                # Temp directory 
+                # Temp directory
                 os.path.join(tempfile.gettempdir(), "mcp-accounting-server.db"),
                 # In-memory database as last resort
                 ":memory:"
             ]
-            
+
             self.db_path = None
             for location in locations:
                 try:
@@ -32,35 +32,49 @@ class DatabaseManager:
                         # Try to create directory
                         db_dir = os.path.dirname(location)
                         os.makedirs(db_dir, exist_ok=True)
-                        
+
                         # Test if we can create a database file
                         test_conn = sqlite3.connect(location)
                         test_conn.close()
-                        
+
                     self.db_path = location
                     print(f"Using database: {location}", file=sys.stderr)
                     break
                 except Exception as e:
                     print(f"Cannot use database location {location}: {e}", file=sys.stderr)
                     continue
-            
+
             if self.db_path is None:
                 raise RuntimeError("Cannot initialize database in any location")
         else:
             self.db_path = db_path
-            
+
+        # For in-memory databases, keep a persistent connection
+        # (otherwise data is lost when connection closes)
+        self._persistent_conn = None
+        if self.db_path == ":memory:":
+            self._persistent_conn = sqlite3.connect(":memory:")
+            self._persistent_conn.row_factory = sqlite3.Row
+
         self.init_database()
 
     @contextmanager
     def get_connection(self):
         if self.db_path is None:
             raise RuntimeError("Database path is None")
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-        finally:
-            conn.close()
+
+        # For in-memory databases, return the persistent connection
+        # (don't close it, or all data is lost!)
+        if self._persistent_conn is not None:
+            yield self._persistent_conn
+        else:
+            # For file-based databases, create and close connections normally
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                yield conn
+            finally:
+                conn.close()
 
     def init_database(self):
         import sys

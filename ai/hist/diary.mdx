@@ -48,6 +48,45 @@ Modernized invoice and reminder PDFs with contemporary design, Kaare Consulting 
 Implemented Skatteverket-compliant validation requiring whole numbers (no decimals) for tax accounts (VAT, payroll tax, etc.) per 22 kap. 1 § SFF. Added ValidationError with clear guidance for using account 3740 for decimal rounding.
 **Key Achievement:** Enforced Swedish tax compliance with helpful error messages.
 
+## September 30, 2025 - Version 3.0: Revolutionary Toolbox Consolidation
+**MAJOR MILESTONE:** Transformed user experience from 28 → 9 MCP tools following "less is more" philosophy for high-value business users. Implemented universal `record_business_event()` with Swedish VAT compliance (25%, 12%, 6%, 0%) and fixed critical system bugs.
+
+### 🎯 Core Transformation
+- **Tool Consolidation:** 28 → 9 tools (68% complexity reduction)
+- **Universal Transaction Recorder:** Single `record_business_event()` replaces create_voucher + add_journal_entry + post_voucher workflow
+- **Swedish VAT Compliance:** Multi-rate support with validation (0.25, 0.12, 0.06, 0.0) per Swedish tax law
+- **Business-Friendly Interface:** Eliminated accounting jargon, using business terminology
+
+### 🔧 New Consolidated Toolbox
+1. **`record_business_event`** - Universal transaction processor with Swedish compliance
+2. **`manage_invoice`** - Complete invoice lifecycle (create, status, overdue checks)
+3. **`manage_payment`** - Payment processing, reminders, reconciliation
+4. **`manage_customer`** - Customer operations with enhanced addressing
+5. **`manage_banking`** - Bank integration and quarterly VAT reporting
+6. **`generate_report`** - Financial statements (trial balance, income, balance sheet)
+7. **`generate_pdf`** - Universal document generation (invoices, reminders, VAT reports)
+8. **`get_guidance`** - Documentation system with AI guidance for vague questions
+9. **`audit_voucher`** - TOTP-secured voucher operations and audit trails
+
+### 🇸🇪 Swedish Legal Integration
+- **BFL Compliance:** Unbroken voucher numbering, detailed descriptions per NJA 2020 s. 497
+- **VAT Rate Flexibility:** Addresses real business scenarios (food 12%, books 6%, exports 0%)
+- **Legal Documentation:** AI guidance enforces counterparty and description requirements
+- **Accounting Rigor:** Maintains double-entry bookkeeping with automatic balance validation
+
+### 🐛 Critical Bug Fixes
+- **Fixed generate_report:** Resolved 'debit' key error in trial balance generation
+- **Fixed get_guidance:** Added fallback for tools missing 'full' documentation
+- **Enhanced Messages:** Improved success messages showing actual accounting entries
+
+### 📊 Business Impact
+- **User Experience:** Dramatically simplified for non-accountants while maintaining professional rigor
+- **Error Prevention:** Built-in Swedish accounting rules prevent common mistakes
+- **Audit Trail:** Enhanced success messages show actual journal entries (DR/CR)
+- **Production Ready:** Zero database schema changes, full backward compatibility
+
+**Key Achievement:** Created the most user-friendly Swedish-compliant accounting MCP server while maintaining enterprise-grade functionality and legal compliance.
+
 ---
 
 # Voucher V004 Corrections & Financial Reports Bug Fix - August 6, 2025
@@ -451,3 +490,565 @@ generate_balance_sheet(
 **Status**: System now provides professional-grade financial reporting suitable for Swedish audit requirements with complete period analysis capabilities.
 
 This implementation provides robust protection against client-side duplicate requests while maintaining the simplicity and performance characteristics required for production accounting operations.
+
+---
+
+## 2025-10-27: VAT Rounding Bug Fix & Test Infrastructure Implementation
+
+### **Critical Bug Resolution: Swedish VAT Compliance**
+
+**Context**: Production system reported critical bug where `record_business_event` with `vat_rate=0.25` consistently failed with error "Voucher is not balanced - total debits must equal total credits". Bug was blocking all VAT-inclusive expense recording, affecting core business operations.
+
+**Failing Case**:
+- Amount: 1006.53 SEK with 25% VAT
+- Expected VAT: 201.31 SEK (theoretical)
+- Swedish requirement: VAT must be whole numbers (Skatteverket 22 kap. 1 § SFF)
+- System behavior: Failed validation despite mathematically correct entries
+
+### **Root Cause Analysis: Three Critical Bugs Identified**
+
+#### **1. Architectural Issue: VAT Logic in Wrong Layer**
+
+**Problem**: VAT calculation logic was implemented directly in `_record_expense_event()` in `server.py` (presentation layer), violating separation of concerns. This meant:
+- Business logic mixed with API/MCP layer
+- Code duplication across expense and invoice handlers
+- No reusability for other accounting operations
+- Difficult to test and maintain
+
+**Discovery**: When asked to implement VAT rounding fix, architecture review revealed the code was a "quick fix" rather than proper service layer implementation. User correctly challenged this approach, leading to elegant redesign.
+
+#### **2. Floating-Point Precision Bug in post_voucher()**
+
+**Critical Bug**: `src/modules/accounting/accounting_service.py:266`
+```python
+# BROKEN CODE
+if not result or result[0] != result[1]:
+    raise ValueError("Voucher is not balanced...")
+```
+
+**Problem**: Using `!=` to compare floating-point numbers fails due to precision limits. Even perfectly balanced entries (1006.530000 debits = 1006.530000 credits) would fail validation due to tiny floating-point representation differences.
+
+**Impact**: ALL voucher posting would eventually fail, not just VAT transactions. This was a ticking time bomb affecting entire accounting system reliability.
+
+#### **3. In-Memory Database Infrastructure Bug**
+
+**Problem**: When creating in-memory databases for testing (`:memory:`), the `get_connection()` context manager would:
+1. Create connection
+2. Execute operations
+3. Close connection on context exit
+4. **For `:memory:` databases, closing connection destroys ALL data**
+5. Next `get_connection()` creates new empty database
+
+**Impact**: Made it impossible to write proper tests. Every test appeared to work during initialization but failed when trying to use the database because tables had vanished.
+
+**Discovery**: Test suite showed "Database initialized successfully" message, but `SELECT name FROM sqlite_master` returned zero tables. This led to discovering the connection lifecycle issue.
+
+### **Solution Architecture: Elegant Service Layer Design**
+
+#### **New Method: add_swedish_vat_entries()**
+
+Created comprehensive VAT handling method in `AccountingService` (`src/modules/accounting/accounting_service.py:101-252`):
+
+**Design Features**:
+```python
+def add_swedish_vat_entries(
+    self,
+    voucher_id: int,
+    gross_amount: Decimal,
+    vat_rate: Decimal,
+    net_account: str,
+    vat_account: str,
+    net_description: str,
+    vat_description: str,
+    transaction_type: str = "expense"
+) -> Dict[str, Any]
+```
+
+**Implementation Details**:
+
+1. **Swedish Compliance Built-In**:
+   - Calculates theoretical VAT: `amount * rate / (1 + rate)`
+   - Rounds VAT to whole SEK: `Decimal(round(vat_theoretical))`
+   - Computes rounding difference: `vat_theoretical - vat_rounded`
+   - Only adds account 3740 entry if `abs(rounding_diff) >= 0.01`
+
+2. **Automatic Rounding Adjustment**:
+   - Uses account 3740 (Öres- och kronutjämning) per Swedish standard
+   - Handles both positive and negative rounding (up or down)
+   - Different debit/credit direction for expenses vs revenue
+   - Maintains perfect balance: `net + vat_rounded + rounding = gross`
+
+3. **Return Value for Transparency**:
+   ```python
+   {
+       "net_amount": Decimal,
+       "vat_amount": Decimal,          # Rounded to whole SEK
+       "vat_theoretical": Decimal,     # Before rounding
+       "rounding_diff": Decimal,       # For account 3740
+       "has_rounding": bool            # True if adjustment needed
+   }
+   ```
+
+4. **Versatility**:
+   - Works for expenses (debit net, debit VAT)
+   - Works for revenue (credit net, credit VAT)
+   - Handles 0% VAT (exempt transactions)
+   - Supports all Swedish VAT rates: 25%, 12%, 6%, 0%
+
+**Example Transaction (1006.53 SEK @ 25% VAT)**:
+```
+Theoretical Calculation:
+  VAT: 1006.53 * 0.25 / 1.25 = 201.306 SEK
+  Net: 1006.53 - 201.306 = 805.224 SEK
+
+Swedish Compliant Result:
+  DR 6110 (Expense):      805.224 SEK  (exact theoretical)
+  DR 2640 (Input VAT):    201.000 SEK  (rounded to whole)
+  DR 3740 (Rounding):       0.306 SEK  (difference)
+  CR 1930 (Bank):        1006.530 SEK
+  =========================================
+  Total Debits:          1006.530 SEK
+  Total Credits:         1006.530 SEK  ✅ PERFECT BALANCE
+```
+
+### **Server Layer Refactoring**
+
+**Before (Buggy, 50+ lines)**:
+```python
+# Complex inline VAT calculation
+# Manual rounding logic
+# Duplicated across expense and invoice handlers
+# No account 3740 handling
+```
+
+**After (Clean, 15 lines)**:
+```python
+vat_result = self.accounting.add_swedish_vat_entries(
+    voucher_id=voucher_id,
+    gross_amount=amount,
+    vat_rate=vat_rate_decimal,
+    net_account="6110",
+    vat_account="2640",
+    net_description=f"{description} ex VAT",
+    vat_description=f"VAT {vat_percentage}%",
+    transaction_type="expense"
+)
+```
+
+**Benefits**:
+- Server layer is thin presentation layer (as it should be)
+- Business logic in service layer (proper architecture)
+- Single source of truth for VAT calculations
+- Easy to test in isolation
+- Reusable across entire system
+
+### **Floating-Point Comparison Fix**
+
+**Before**:
+```python
+if not result or result[0] != result[1]:
+    raise ValueError("Voucher is not balanced...")
+```
+
+**After**:
+```python
+if not result:
+    raise ValueError("No journal entries found for voucher")
+
+# Use tolerance for floating point comparison (allow 1 öre difference)
+if abs(result[0] - result[1]) > 0.01:
+    raise ValueError(f"Voucher is not balanced (diff: {abs(result[0] - result[1]):.4f})")
+```
+
+**Rationale**: Swedish currency has öre (1/100 SEK) as smallest unit. Allowing 0.01 SEK tolerance is semantically correct (can't have smaller difference in real money) and handles floating-point precision issues.
+
+### **In-Memory Database Fix**
+
+**Problem**: Each `get_connection()` call created and destroyed a new `:memory:` database.
+
+**Solution** (`src/database/base.py:52-77`):
+```python
+class DatabaseManager:
+    def __init__(self, db_path: Optional[str] = None):
+        # ... path selection logic ...
+
+        # For in-memory databases, keep a persistent connection
+        # (otherwise data is lost when connection closes)
+        self._persistent_conn = None
+        if self.db_path == ":memory:":
+            self._persistent_conn = sqlite3.connect(":memory:")
+            self._persistent_conn.row_factory = sqlite3.Row
+
+        self.init_database()
+
+    @contextmanager
+    def get_connection(self):
+        # For in-memory databases, return the persistent connection
+        # (don't close it, or all data is lost!)
+        if self._persistent_conn is not None:
+            yield self._persistent_conn
+        else:
+            # For file-based databases, create and close normally
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                yield conn
+            finally:
+                conn.close()
+```
+
+**Key Insight**: In-memory SQLite databases exist ONLY as long as at least one connection is open. Closing all connections destroys the database. Solution: keep one persistent connection alive for the lifetime of the DatabaseManager instance.
+
+**Impact**: Enables proper testing infrastructure without touching production database.
+
+### **Comprehensive Test Infrastructure**
+
+#### **Test Suite Structure**
+```
+tests/
+├── __init__.py
+├── conftest.py              # Pytest fixtures
+├── test_vat_rounding.py     # VAT compliance tests
+└── README.md                # Documentation
+```
+
+#### **Fixture Design** (`tests/conftest.py`)
+
+**Philosophy**: Fresh in-memory database for each test, zero pollution, perfect isolation.
+
+```python
+@pytest.fixture
+def test_db():
+    """
+    Create in-memory test database with full schema.
+    DatabaseManager automatically creates all tables.
+    Destroyed after test completes - zero data persistence.
+    """
+    db = DatabaseManager(db_path=":memory:")
+    yield db
+    # Cleanup automatic when in-memory DB goes out of scope
+
+@pytest.fixture
+def accounting_service(test_db):
+    """AccountingService instance with test database."""
+    return AccountingService(test_db)
+
+@pytest.fixture
+def sample_voucher(accounting_service):
+    """Pre-created voucher for quick testing."""
+    voucher_id = accounting_service.create_voucher(
+        description="Test voucher",
+        voucher_type=VoucherType.PURCHASE,
+        total_amount=Decimal("1000.00"),
+        voucher_date=date.today()
+    )
+    return voucher_id
+```
+
+#### **Test Coverage** (`tests/test_vat_rounding.py`)
+
+**Core Bug Fix Tests**:
+1. `test_failing_case_1006_53_sek` - Original bug report case
+2. `test_working_case_1013_06_sek` - Known working case for regression
+3. `test_vat_exempt_transaction` - 0% VAT handling
+4. `test_perfect_whole_number_vat` - No rounding needed scenario
+5. `test_revenue_vat_rounding` - Credit-side VAT (invoices)
+
+**Swedish VAT Rates**:
+6. `test_multiple_vat_rates` - Tests 25%, 12%, 6%, 0% compliance
+7. `test_invalid_vat_rate` - Validates rate validation
+
+**Edge Cases**:
+8. `test_tiny_amount` - 1.25 SEK transaction
+9. `test_large_amount` - Millions of SEK
+10. `test_rounding_threshold` - 0.01 SEK minimum rounding
+
+**Test Execution**:
+```bash
+uv sync --extra dev
+uv run pytest tests/test_vat_rounding.py -v
+
+# Expected output:
+# tests/test_vat_rounding.py::TestSwedishVATRounding::test_failing_case_1006_53_sek PASSED
+# tests/test_vat_rounding.py::TestSwedishVATRounding::test_working_case_1013_06_sek PASSED
+# ... (10 tests total)
+# ======================== 10 passed in 0.15s ========================
+```
+
+#### **Test Infrastructure Benefits**
+
+1. **Zero Production Risk**: All tests use `:memory:` databases
+2. **Fast Execution**: No disk I/O, milliseconds per test
+3. **Perfect Isolation**: Each test gets fresh database
+4. **Repeatable**: Same starting state every time
+5. **CI/CD Ready**: No external dependencies
+6. **Documentation**: Tests serve as usage examples
+
+### **Additional Improvements**
+
+#### **1. Python Version Requirement**
+
+**Updated** `pyproject.toml`:
+```toml
+requires-python = ">=3.10"  # Was >=3.9
+```
+
+**Reason**: MCP framework requires Python 3.10+. Was causing dependency resolution failures with `uv sync`.
+
+#### **2. Pytest Configuration**
+
+**Enhanced** `pyproject.toml`:
+```toml
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]        # Was ["."]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"    # Added verbose and short traceback
+```
+
+**Benefits**: Cleaner test output, focused on `tests/` directory only, better error messages.
+
+#### **3. Test Documentation**
+
+Created comprehensive `tests/README.md` with:
+- Setup instructions
+- Running tests (all, specific, verbose, coverage)
+- Test structure explanation
+- Fixture documentation
+- Example test output
+- Troubleshooting guide
+
+### **Debugging Process & Methodology**
+
+#### **Initial Investigation**
+
+1. **Reproduced bug** with minimal test case
+2. **Traced execution** through server → accounting service → database
+3. **Discovered architectural issues** during code review
+4. **Proposed elegant solution** (service layer method)
+5. **User validation** of approach (collaborative design)
+
+#### **Implementation Challenges**
+
+**Challenge 1**: Testing new code without database pollution
+- **Solution**: In-memory databases
+- **Obstacle**: Connection lifecycle destroying data
+- **Resolution**: Persistent connection pattern
+
+**Challenge 2**: Floating-point precision
+- **Discovery**: Even perfect balance (1006.53 = 1006.53) failed
+- **Solution**: Tolerance-based comparison
+- **Threshold**: 0.01 SEK (1 öre, smallest Swedish currency unit)
+
+**Challenge 3**: Account creation for tests
+- **Issue**: Test database had no accounts (empty BAS 2022)
+- **Solution**: Fixtures create minimal required accounts
+- **Alternative**: Could auto-load full BAS 2022, but slower
+
+#### **Verification Strategy**
+
+**Layer-by-layer testing**:
+1. ✅ Direct calculation test (pure math, no database)
+2. ✅ AccountingService method test (with in-memory DB)
+3. ✅ Server integration test (full stack)
+4. ✅ Client-side production test (user confirmation)
+
+**Incremental fixes**:
+- Fix 1: Service layer method → still failed (floats)
+- Fix 2: Float tolerance → still failed (DB issue)
+- Fix 3: Persistent connection → ALL TESTS PASS ✅
+- Fix 4: Production test → CONFIRMED WORKING ✅
+
+### **Technical Achievements**
+
+#### **Code Quality**
+
+**Before**:
+- VAT logic: 50+ lines duplicated in server layer
+- Testing: Impossible without production database risk
+- Architecture: Business logic in presentation layer
+- Reliability: Floating-point comparison ticking time bomb
+
+**After**:
+- VAT logic: Reusable service method, single source of truth
+- Testing: Comprehensive pytest suite, zero production risk
+- Architecture: Clean separation of concerns, proper layering
+- Reliability: Tolerance-based comparisons, mathematically sound
+
+#### **Swedish Compliance**
+
+**Skatteverket Requirements Met**:
+- ✅ VAT amounts must be whole numbers (22 kap. 1 § SFF)
+- ✅ Account 3740 used for rounding adjustments
+- ✅ Perfect balance maintained (debits = credits exactly)
+- ✅ BAS 2022 account numbers used correctly
+- ✅ Works for all Swedish VAT rates (25%, 12%, 6%, 0%)
+
+#### **Maintainability**
+
+**New Developer Experience**:
+1. Read `tests/test_vat_rounding.py` for usage examples
+2. Run `pytest` to verify everything works
+3. Modify `add_swedish_vat_entries()` in one place
+4. All consumers automatically benefit from improvements
+
+**Documentation**:
+- Service method has comprehensive docstring with examples
+- Tests serve as living documentation
+- Clear separation of concerns aids understanding
+
+### **Business Impact**
+
+#### **Immediate**
+
+**Problem Solved**:
+- ✅ Expense recording with VAT now works
+- ✅ Invoice generation with VAT compliant
+- ✅ All pending 25% VAT transactions can be processed
+- ✅ Month-end closing no longer blocked
+
+**Reliability Improved**:
+- Floating-point bug would have caused random failures
+- Now: Mathematically sound tolerance-based validation
+- System can handle all currency amounts reliably
+
+#### **Long-Term**
+
+**Architectural Foundation**:
+- Service layer method reusable for future features
+- Test infrastructure enables confident refactoring
+- Clean architecture reduces maintenance burden
+- Swedish compliance built into core, not bolted on
+
+**Scalability**:
+- Can easily add new VAT rates (if Swedish law changes)
+- Can extend to other tax types (employer taxes, etc.)
+- Testing pattern applicable to all future features
+- In-memory testing allows rapid development
+
+### **Lessons Learned**
+
+#### **1. Architecture Matters**
+
+**Initial Impulse**: Quick fix in server layer (fast, works)
+**Correct Approach**: Service layer method (proper, reusable)
+**User Insight**: Challenged quick fix, led to better design
+**Result**: Elegant solution vs. technical debt
+
+#### **2. Floating-Point Precision**
+
+**Classic Bug**: `if a == b` for floats
+**Real World**: Even "equal" floats may differ by tiny amounts
+**Solution**: Always use tolerance: `if abs(a - b) < epsilon`
+**Domain Specific**: Use smallest currency unit (öre) as tolerance
+
+#### **3. Testing Infrastructure Investment**
+
+**Upfront Cost**: Time to set up pytest, fixtures, in-memory DB
+**Ongoing Benefit**:
+- Confidence in changes
+- Regression prevention
+- Documentation through tests
+- Faster development (no manual testing)
+
+#### **4. Collaborative Design**
+
+**User Challenged**: "Is this the most elegant solution?"
+**Discussion**: Evaluated architectural alternatives
+**Result**: Better design, proper layer separation
+**Takeaway**: Code review catches quick fixes before they ship
+
+### **Production Deployment**
+
+**Files Modified**:
+1. `src/modules/accounting/accounting_service.py` - Core fix
+2. `src/server.py` - Refactored to use service
+3. `src/database/base.py` - In-memory DB support
+4. `pyproject.toml` - Python version, pytest config
+5. `tests/` - New test infrastructure
+
+**Deployment Steps**:
+1. ✅ Code changes committed
+2. ✅ Tests passing locally
+3. ✅ Production server restarted
+4. ✅ Client-side verification successful
+5. ✅ Bug confirmed resolved
+
+**Zero Breaking Changes**:
+- All existing functionality preserved
+- Only buggy behavior fixed
+- New service method is additive
+- Database schema unchanged
+- Backward compatible
+
+### **Success Metrics**
+
+**Technical**:
+- ✅ 10/10 tests passing
+- ✅ Zero production database writes during debugging
+- ✅ All three critical bugs fixed
+- ✅ Clean architecture achieved
+- ✅ Swedish compliance validated
+
+**Business**:
+- ✅ Original bug report (1006.53 SEK) now works
+- ✅ Client-side production test successful
+- ✅ System unblocked for daily operations
+- ✅ Confidence in Swedish VAT handling restored
+
+### **Future Enhancement Opportunities**
+
+**Potential Improvements**:
+1. Auto-load full BAS 2022 in test fixtures
+2. Add VAT rate validation against Skatteverket API
+3. Generate VAT-specific financial reports
+4. Add property-based testing (hypothesis)
+5. Extend to EU reverse charge VAT scenarios
+6. Add test coverage reporting
+7. Implement integration tests with full MCP stack
+
+**Not Needed Now**:
+- Current solution is production-ready
+- Tests provide excellent coverage
+- Architecture is clean and maintainable
+- Swedish compliance is complete
+
+### **Conclusion**
+
+This fix represents a **major milestone** in system maturity:
+
+**From**: Quick fixes, architectural debt, untestable code, hidden bugs
+**To**: Elegant architecture, comprehensive tests, Swedish compliance, production reliability
+
+**Key Achievement**: Transformed critical bug into opportunity for architectural improvement. Instead of patching symptoms, we addressed root causes and built proper infrastructure.
+
+**Status**: ✅ Production-ready, client-verified, fully tested, properly architected
+**Version**: 1.0.0 (Production Release)
+**Impact**: Critical → System unblocked, accounting operations restored, quality elevated
+
+---
+
+## 2025-10-27: Version 1.0.0 Production Release
+
+**Major Milestone:** System promoted to Version 1.0.0 following successful bug fixes, comprehensive testing implementation, and production verification.
+
+**Release Criteria Met:**
+- ✅ Critical bugs fixed (VAT rounding, floating-point comparison, in-memory DB)
+- ✅ Comprehensive test suite (pytest with 10 tests, all passing)
+- ✅ Client-side production verification successful
+- ✅ Swedish compliance validated (Skatteverket requirements met)
+- ✅ Clean architecture (service layer refactoring complete)
+- ✅ Documentation complete (diary, CLAUDE.md, best-practices, tests/README)
+- ✅ Zero production data risk (in-memory testing infrastructure)
+- ✅ Professional audit trail with TOTP security
+
+**System Status:**
+- Production-ready unified accounting platform
+- Swedish BAS 2022 compliant
+- Bank-level security
+- Professional financial reporting
+- Comprehensive testing
+- Clean, maintainable codebase
+
+This marks the transition from development (0.x) to production-stable (1.0.0) status.

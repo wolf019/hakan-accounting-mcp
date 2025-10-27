@@ -4,7 +4,10 @@ Provides contextual guidance and best practices for accounting tools.
 """
 
 from typing import Optional, Dict, List, Any
-from .tool_documentation import TOOL_DOCUMENTATION, WORKFLOWS, ACCOUNT_MAPPINGS, VAT_RATES
+from .tool_documentation import (
+    TOOL_DOCUMENTATION, WORKFLOWS, ACCOUNT_MAPPINGS, VAT_RATES,
+    AI_GUIDANCE, SYSTEM_OVERVIEW, TOOL_CATEGORIES
+)
 
 
 class AccountingDocumentationService:
@@ -18,6 +21,9 @@ class AccountingDocumentationService:
         self.workflows = WORKFLOWS
         self.accounts = ACCOUNT_MAPPINGS
         self.vat_rates = VAT_RATES
+        self.ai_guidance = AI_GUIDANCE
+        self.system_overview = SYSTEM_OVERVIEW
+        self.categories = TOOL_CATEGORIES
     
     def get_documentation(self, topic: Optional[str] = None, 
                          depth: str = "essentials", 
@@ -35,6 +41,10 @@ class AccountingDocumentationService:
         """
         if topic is None or topic == "overview":
             return self._get_overview(category)
+
+        # Show AI guidance for handling vague questions
+        if topic == "ai_guidance" or topic == "vague_questions":
+            return self._format_ai_guidance()
         
         if topic in self.tool_docs:
             return self._format_tool_documentation(topic, depth)
@@ -51,82 +61,49 @@ class AccountingDocumentationService:
     
     def _get_overview(self, category: Optional[str] = None) -> str:
         """Generate overview documentation with tool listings."""
+        if category is None:
+            # Return the comprehensive system overview
+            return self.system_overview
+
+        # Category-specific overview
         output = []
-        
-        # Welcome message
-        output.append("# 🏢 MCP Accounting Server - Tool Documentation")
+        output.append(f"# 📋 {category.title()} Tools")
         output.append("")
-        output.append("Welcome to Sweden's AI-powered accounting system! This system provides")
-        output.append("complete double-entry bookkeeping with Swedish compliance (BAS 2022).")
-        output.append("")
-        
-        # Key principles
-        output.append("## 🎯 Key Principles")
-        output.append("- **Swedish Compliance**: All tools follow BAS 2022 and Swedish tax law")
-        output.append("- **Double-Entry**: Every transaction creates balanced journal entries")
-        output.append("- **Audit Trail**: Complete history of all financial transactions")
-        output.append("- **VAT Integration**: Automatic 25% VAT calculation and posting")
-        output.append("")
-        
-        # Tool categories
-        categories = {}
-        for tool_name, tool_doc in self.tool_docs.items():
-            cat = tool_doc['category']
-            if category is None or cat == category:
-                if cat not in categories:
-                    categories[cat] = []
-                categories[cat].append(tool_name)
-        
-        output.append("## 📋 Available Tools")
-        output.append("")
-        
-        category_names = {
-            'invoicing': '📄 Invoicing Tools',
-            'expenses': '💰 Expense Management',
-            'accounting': '📊 Core Accounting',
-            'reporting': '📈 Financial Reporting',
-            'reconciliation': '🔄 Bank Reconciliation',
-            'voucher_security': '🔐 Security-Protected Operations',
-            'voucher_management': '📝 Voucher Management',
-            'voucher_reporting': '📋 Voucher Reporting',
-            'financial_reporting': '📈 Financial Reporting'
-        }
-        
-        for cat, tools in categories.items():
-            output.append(f"### {category_names.get(cat, cat.title())}")
+
+        if category in self.categories:
+            tools = self.categories[category]
             for tool in tools:
-                doc = self.tool_docs[tool]['essentials']
-                output.append(f"- **{tool}**: {doc['description']}")
-            output.append("")
-        
-        # Common workflows
-        output.append("## 🔄 Common Workflows")
+                if tool in self.tool_docs:
+                    doc = self.tool_docs[tool]['essentials']
+                    output.append(f"## {tool}")
+                    output.append(f"{doc['description']}")
+                    output.append(f"**Example**: `{doc['example']}`")
+                    output.append("")
+
+        return "\n".join(output)
+
+    def _format_ai_guidance(self) -> str:
+        """Format AI guidance for handling vague questions."""
+        guidance = self.ai_guidance['handle_vague_questions']
+
+        output = []
+        output.append("# 🤖 AI Guidance: Handling Vague Questions")
         output.append("")
-        for workflow_name, workflow in self.workflows.items():
-            output.append(f"### {workflow_name.replace('_', ' ').title()}")
-            output.append(f"{workflow['description']}")
-            output.append(f"**Steps**: {' → '.join(workflow['steps'])}")
-            output.append("")
-        
-        # Swedish compliance highlights
-        output.append("## 🇸🇪 Swedish Compliance Highlights")
-        output.append("- **BAS 2022**: Standard Swedish chart of accounts")
-        output.append("- **VAT Rates**: 25% standard, 12% reduced, 6% low, 0% export")
-        output.append("- **Invoice Numbers**: Sequential numbering required")
-        output.append("- **Payment Terms**: 30 days standard, interest after due date")
-        output.append("- **Audit Trail**: Complete transaction history maintained")
+        output.append(f"**Principle**: {guidance['principle']}")
         output.append("")
-        
-        # Quick start
-        output.append("## 🚀 Quick Start")
-        output.append("1. **Get tool help**: `tools_documentation('create_invoice')`")
-        output.append("2. **Create invoice**: `create_invoice('customer@company.se', [...])`")
-        output.append("3. **Check books**: `generate_trial_balance()`")
-        output.append("4. **Get workflows**: `workflow_guide('invoice_to_payment')`")
+
+        output.append("## 💡 Examples:")
+        for example in guidance['examples']:
+            output.append(f"• {example}")
         output.append("")
-        
-        output.append("Use `tools_documentation('tool_name', 'full')` for detailed documentation.")
-        
+
+        output.append("## ✅ Required Approach:")
+        for approach in guidance['required_approach']:
+            output.append(f"• {approach}")
+        output.append("")
+
+        output.append("**Remember**: Swedish law requires detailed descriptions and counterparty information!")
+
         return "\n".join(output)
     
     def _format_tool_documentation(self, tool_name: str, depth: str) -> str:
@@ -181,7 +158,12 @@ class AccountingDocumentationService:
     
     def _format_full_documentation(self, tool_name: str, tool_doc: Dict) -> str:
         """Format complete documentation for a tool."""
-        full_doc = tool_doc['full']
+        # Check if full documentation exists, otherwise use essentials
+        if 'full' in tool_doc:
+            full_doc = tool_doc['full']
+        else:
+            # Fallback to essentials if no full documentation
+            return f"📋 {tool_name} - Full documentation not available. Here's the essentials view:\n\n" + self._format_essentials(tool_name, tool_doc)
         output = []
         
         output.append(f"# 📚 {tool_name} - Complete Documentation")

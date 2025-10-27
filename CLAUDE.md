@@ -4,27 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**🎉 UNIFIED ACCOUNTING SYSTEM - VERSION 0.2.0**
+**🎉 UNIFIED ACCOUNTING SYSTEM - VERSION 1.0.0**
 
 This is a comprehensive MCP (Model Context Protocol) Invoice Server with a **unified accounting system** featuring Swedish compliance, double-entry bookkeeping, and professional financial reporting.
 
 **Current System Status:**
 - ✅ **Unified Accounting System**: OPERATIONAL
 - ✅ **Swedish Chart of Accounts**: LOADED (54 BAS 2022 IT Consultant accounts)
-- ✅ **Double-Entry Bookkeeping**: WORKING
+- ✅ **Double-Entry Bookkeeping**: WORKING with Swedish VAT compliance
 - ✅ **Financial Reporting**: FUNCTIONAL (Trial Balance, Income Statement, Balance Sheet)
 - ✅ **Invoice Management**: READY
 - ✅ **Project Structure**: REORGANIZED (Modular Architecture)
+- ✅ **Test Infrastructure**: COMPLETE (pytest with in-memory databases)
 - ✅ **Email Parser**: REMOVED (Clean codebase)
 
 **Key Business Features:**
-- **Swedish Compliance**: BAS 2022 chart of accounts, 25% VAT, Swedish payment reminders
+- **Swedish Compliance**: BAS 2022 chart of accounts, multi-rate VAT (25%, 12%, 6%, 0%), Swedish payment reminders
+- **VAT Rounding**: Automatic whole-number VAT per Skatteverket (22 kap. 1 § SFF) with account 3740 adjustments
 - **Double-Entry Bookkeeping**: Automatic voucher generation with journal entries
 - **Financial Reporting**: Trial balance, income statements, balance sheets
 - **Invoice System**: Professional PDF generation with Swedish business requirements
 - **Expense Tracking**: Comprehensive expense management with VAT handling
 - **Bank Reconciliation**: Transaction matching and reconciliation tools
 - **Modern Architecture**: Modular, service-oriented design with comprehensive testing
+- **Test Suite**: pytest with in-memory databases, zero production data risk
 
 **Data Storage:**
 - SQLite database at `~/.mcp-accounting-server/invoices.db`
@@ -46,16 +49,30 @@ uv pip install -e .
 ### Testing
 ```bash
 # Set up environment with uv (recommended)
-uv venv
-source .venv/bin/activate
-uv pip install -e .
+uv sync --extra dev
 
-# Run comprehensive test suite
-python test_comprehensive.py
+# Run pytest suite (recommended - in-memory databases, no production impact)
+uv run pytest tests/ -v
 
-# Test server directly  
-python run_server.py
+# Run specific test file
+uv run pytest tests/test_vat_rounding.py -v
+
+# Run with coverage
+uv run pytest tests/ --cov=src --cov-report=html
+
+# Run comprehensive integration test suite
+uv run python test_comprehensive.py
+
+# Test server directly
+uv run python run_server.py
 ```
+
+**Testing Philosophy:**
+- All tests use in-memory SQLite databases (`:memory:`)
+- Zero impact on production database
+- Fresh database for each test (perfect isolation)
+- Fast execution (milliseconds per test)
+- See `tests/README.md` and `ai/docs/best-practices.md` for details
 
 ### Code Quality
 ```bash
@@ -246,7 +263,37 @@ swedish_compliance_guide("invoice_requirements")
 
 ## Testing
 
-### Comprehensive Test Suite
+### Pytest Suite (Primary)
+
+**Location:** `tests/`
+
+The project uses pytest with in-memory SQLite databases for fast, isolated testing:
+
+**Run Tests:**
+```bash
+uv sync --extra dev
+uv run pytest tests/ -v
+```
+
+**Test Coverage:**
+- Swedish VAT rounding compliance (all rates: 25%, 12%, 6%, 0%)
+- Floating-point precision handling
+- In-memory database fixtures
+- Edge cases (tiny amounts, large amounts, rounding thresholds)
+
+**Key Features:**
+- ✅ **Zero Production Risk**: All tests use `:memory:` databases
+- ✅ **Fast**: No disk I/O, runs in milliseconds
+- ✅ **Isolated**: Fresh database per test
+- ✅ **Repeatable**: Same starting state every time
+- ✅ **CI/CD Ready**: No external dependencies
+
+**Documentation:**
+- See `tests/README.md` for detailed usage
+- See `ai/docs/best-practices.md` for development workflow
+- Tests serve as usage examples for the accounting service
+
+### Integration Test Suite
 
 The `test_comprehensive.py` file provides complete system testing:
 
@@ -326,4 +373,16 @@ Run tests before making changes to ensure system compatibility and integrity.
 
 The system is now a **production-ready unified accounting platform** with Swedish compliance, suitable for IT consultants and small businesses requiring professional invoicing and accounting capabilities.
 
-## READ the diary at `ai/hist/diary.mdx`
+## Important Documentation
+
+**Always read these files when working on this project:**
+
+1. **`ai/hist/diary.mdx`** - Complete development history, bug fixes, architectural decisions
+2. **`ai/docs/best-practices.md`** - Development workflow, testing guidelines, uv commands
+3. **`tests/README.md`** - Test suite usage and fixture documentation
+
+**Latest Major Changes (v1.0.0):**
+- Swedish VAT rounding with account 3740 (Öresutjämning)
+- Floating-point comparison fix in `post_voucher()`
+- In-memory database testing infrastructure
+- Service layer refactoring for VAT calculations

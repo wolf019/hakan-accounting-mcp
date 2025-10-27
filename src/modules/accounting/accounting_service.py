@@ -45,26 +45,26 @@ class AccountingService:
                 raise RuntimeError("Failed to create voucher record")
             return cursor.lastrowid
     
-    def add_journal_entry(self, voucher_id: int, account_number: str, 
+    def add_journal_entry(self, voucher_id: int, account_number: str,
                          description: str, debit_amount: Decimal = Decimal("0"),
                          credit_amount: Decimal = Decimal("0"),
                          reference: Optional[str] = None) -> int:
         """Add a journal entry to a voucher with duplicate prevention"""
-        
+
         # Initialize idempotency service (30-second window)
         idempotency = JournalEntryIdempotency(self.db, window_seconds=30)
-        
+
         # Generate request hash for duplicate detection
         request_hash = idempotency.generate_request_hash(
             voucher_id, account_number, description, debit_amount, credit_amount, reference
         )
-        
+
         # Check for duplicate request
         existing_entry_id = idempotency.check_duplicate(request_hash)
         if existing_entry_id:
             # Return existing entry ID - this is idempotent behavior
             return existing_entry_id
-        
+
         # Validate journal entry
         if debit_amount < 0 or credit_amount < 0:
             raise ValueError("Debit and credit amounts cannot be negative")
@@ -72,12 +72,12 @@ class AccountingService:
             raise ValueError("Journal entry cannot have both debit and credit amounts")
         if debit_amount == 0 and credit_amount == 0:
             raise ValueError("Journal entry must have either debit or credit amount")
-        
+
         # Get account ID
         account_id = self._get_account_id(account_number)
         if not account_id:
             raise ValueError(f"Account {account_number} not found")
-        
+
         # Create the journal entry
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
@@ -87,16 +87,169 @@ class AccountingService:
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (voucher_id, account_id, description, float(debit_amount), float(credit_amount), reference))
             conn.commit()
-            
+
             if cursor.lastrowid is None:
                 raise RuntimeError("Failed to create journal entry record")
-            
+
             entry_id = cursor.lastrowid
-            
+
             # Record the request for future duplicate detection
             idempotency.record_request(request_hash, entry_id, voucher_id, account_number)
-            
+
             return entry_id
+
+    def add_swedish_vat_entries(
+        self,
+        voucher_id: int,
+        gross_amount: Decimal,
+        vat_rate: Decimal,
+        net_account: str,
+        vat_account: str,
+        net_description: str,
+        vat_description: str,
+        transaction_type: str = "expense"
+    ) -> Dict[str, Any]:
+        """
+        Add journal entries for VAT transactions with Swedish compliance.
+
+        Handles Swedish Skatteverket requirement per 22 kap. 1 § SFF that VAT amounts
+        must be whole numbers (no decimals). Automatically adds rounding adjustments
+        to account 3740 (Öres- och kronutjämning) when needed.
+
+        Args:
+            voucher_id: Voucher to add entries to
+            gross_amount: Total amount including VAT
+            vat_rate: VAT rate as decimal (0.25, 0.12, 0.06, 0.0)
+            net_account: Account number for net amount (e.g., "6110" for expenses, "3001" for revenue)
+            vat_account: Account number for VAT ("2640" for input VAT, "2650" for output VAT)
+            net_description: Description for net amount entry
+            vat_description: Description for VAT entry
+            transaction_type: "expense" or "revenue" (determines debit/credit direction)
+
+        Returns:
+            Dict with calculation details:
+            {
+                "net_amount": Decimal,
+                "vat_amount": Decimal (rounded to whole SEK),
+                "vat_theoretical": Decimal (before rounding),
+                "rounding_diff": Decimal,
+                "has_rounding": bool
+            }
+
+        Example:
+            # Expense with 25% VAT
+            result = accounting.add_swedish_vat_entries(
+                voucher_id=123,
+                gross_amount=Decimal("1006.53"),
+                vat_rate=Decimal("0.25"),
+                net_account="6110",
+                vat_account="2640",
+                net_description="Claude Max subscription",
+                vat_description="VAT 25%",
+                transaction_type="expense"
+            )
+            # Creates entries: DR 6110: 805.22, DR 2640: 201.00, DR 3740: 0.31
+        """
+        if vat_rate < 0 or vat_rate > 1:
+            raise ValueError(f"Invalid VAT rate {vat_rate}. Must be between 0 and 1.")
+
+        if vat_rate == 0:
+            # No VAT - simple entry
+            if transaction_type == "expense":
+                self.add_journal_entry(
+                    voucher_id=voucher_id,
+                    account_number=net_account,
+                    description=f"{net_description} (VAT exempt)",
+                    debit_amount=gross_amount
+                )
+            else:  # revenue
+                self.add_journal_entry(
+                    voucher_id=voucher_id,
+                    account_number=net_account,
+                    description=f"{net_description} (VAT exempt)",
+                    credit_amount=gross_amount
+                )
+
+            return {
+                "net_amount": gross_amount,
+                "vat_amount": Decimal("0"),
+                "vat_theoretical": Decimal("0"),
+                "rounding_diff": Decimal("0"),
+                "has_rounding": False
+            }
+
+        # Calculate theoretical VAT and net amounts
+        vat_theoretical = gross_amount * vat_rate / (Decimal("1") + vat_rate)
+        net_theoretical = gross_amount - vat_theoretical
+
+        # Round VAT to whole SEK (Swedish Skatteverket requirement per 22 kap. 1 § SFF)
+        vat_rounded = Decimal(round(vat_theoretical))
+
+        # Calculate rounding difference for account 3740
+        rounding_diff = vat_theoretical - vat_rounded
+        has_rounding = abs(rounding_diff) >= Decimal("0.01")
+
+        # Add net amount entry
+        if transaction_type == "expense":
+            self.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number=net_account,
+                description=net_description,
+                debit_amount=net_theoretical
+            )
+        else:  # revenue
+            self.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number=net_account,
+                description=net_description,
+                credit_amount=net_theoretical
+            )
+
+        # Add VAT entry (always rounded to whole SEK)
+        if transaction_type == "expense":
+            self.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number=vat_account,
+                description=vat_description,
+                debit_amount=vat_rounded
+            )
+        else:  # revenue
+            self.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number=vat_account,
+                description=vat_description,
+                credit_amount=vat_rounded
+            )
+
+        # Add rounding adjustment if needed (account 3740)
+        if has_rounding:
+            # For expenses: if VAT rounded down, debit 3740 (we absorb the difference)
+            # For revenue: if VAT rounded down, credit 3740 (customer pays less VAT)
+            if transaction_type == "expense":
+                self.add_journal_entry(
+                    voucher_id=voucher_id,
+                    account_number="3740",  # Öres- och kronutjämning
+                    description=f"VAT rounding adjustment ({vat_theoretical:.2f} → {vat_rounded:.0f})",
+                    debit_amount=abs(rounding_diff) if rounding_diff > 0 else Decimal("0"),
+                    credit_amount=abs(rounding_diff) if rounding_diff < 0 else Decimal("0")
+                )
+            else:  # revenue
+                self.add_journal_entry(
+                    voucher_id=voucher_id,
+                    account_number="3740",
+                    description=f"VAT rounding adjustment ({vat_theoretical:.2f} → {vat_rounded:.0f})",
+                    # Opposite direction for revenue
+                    credit_amount=abs(rounding_diff) if rounding_diff > 0 else Decimal("0"),
+                    debit_amount=abs(rounding_diff) if rounding_diff < 0 else Decimal("0")
+                )
+
+        return {
+            "net_amount": net_theoretical,
+            "vat_amount": vat_rounded,
+            "vat_theoretical": vat_theoretical,
+            "rounding_diff": rounding_diff,
+            "has_rounding": has_rounding
+        }
     
     def post_voucher(self, voucher_id: int) -> bool:
         """Post a voucher - updates account balances and marks as posted"""
@@ -109,9 +262,13 @@ class AccountingService:
                 FROM journal_entries WHERE voucher_id = ?
             """, (voucher_id,))
             result = cursor.fetchone()
-            
-            if not result or result[0] != result[1]:
-                raise ValueError("Voucher is not balanced - total debits must equal total credits")
+
+            if not result:
+                raise ValueError("No journal entries found for voucher")
+
+            # Use tolerance for floating point comparison (allow 1 öre difference)
+            if abs(result[0] - result[1]) > 0.01:
+                raise ValueError(f"Voucher is not balanced - total debits must equal total credits (diff: {abs(result[0] - result[1]):.4f})")
             
             # Get all journal entries for this voucher
             cursor.execute("""
