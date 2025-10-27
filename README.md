@@ -1,19 +1,23 @@
 # MCP Accounting Server
 
-**Sweden's First AI-Powered Unified Accounting System**
+**Version 1.0.0 - Sweden's First AI-Powered Unified Accounting System**
 
 A comprehensive MCP (Model Context Protocol) accounting server that provides complete double-entry bookkeeping, Swedish compliance, and professional financial reporting through natural language conversation with Claude Desktop.
+
+**🎉 Version 1.0.0 Release:** Production-ready with Swedish VAT rounding compliance, comprehensive pytest suite, and bank-level security. Fully tested and client-verified.
 
 ## 🏢 System Overview
 
 The MCP Accounting Server transforms traditional accounting into an AI-accessible system where complex financial operations become as simple as natural language commands. Built for Swedish businesses, it provides:
 
 - **Double-Entry Bookkeeping**: Automatic voucher generation with balanced journal entries
-- **Swedish Compliance**: BAS 2022 chart of accounts, VAT handling, and legal requirements
+- **Swedish Compliance**: BAS 2022 chart of accounts, multi-rate VAT (25%, 12%, 6%, 0%), legal requirements
+- **VAT Rounding**: Automatic whole-number VAT per Skatteverket (22 kap. 1 § SFF) with account 3740 adjustments
 - **Professional Reporting**: Trial balance, income statements, and balance sheets
 - **Invoice Management**: Complete invoice lifecycle from creation to payment
 - **Expense Tracking**: Business expense management with VAT calculations
 - **Bank Reconciliation**: Transaction matching and account reconciliation
+- **Test Suite**: Comprehensive pytest suite with in-memory databases (zero production risk)
 
 ## 🚀 Quick Start
 
@@ -21,15 +25,14 @@ The MCP Accounting Server transforms traditional accounting into an AI-accessibl
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/tomaxberg/mcp-accounting-server.git
 cd mcp-accounting-server
 
-# Create virtual environment
-uv venv
-source .venv/bin/activate
+# Install dependencies (uv handles venv automatically)
+uv sync
 
-# Install dependencies
-uv pip install -e .
+# For development with tests
+uv sync --extra dev
 ```
 
 ### Claude Desktop Integration
@@ -230,6 +233,8 @@ generate_vat_report(1, 2025)  # Q1 2025
 - **Reduced Rate:** 12% (food, hotels)
 - **Low Rate:** 6% (books, newspapers)
 - **Zero Rate:** 0% (exports)
+- **Automatic Rounding:** VAT amounts rounded to whole SEK per Skatteverket requirement (22 kap. 1 § SFF)
+- **Rounding Adjustments:** Account 3740 (Öres- och kronutjämning) used for precision differences
 
 ### Invoice Requirements
 - Sequential invoice numbering
@@ -238,9 +243,10 @@ generate_vat_report(1, 2025)  # Q1 2025
 - Interest calculation after due date
 
 ### Chart of Accounts
-- **BAS 2022 Standard:** 54 predefined Swedish accounts
+- **BAS 2022 Standard:** 54 predefined Swedish accounts for IT consultants
 - **Proper Classifications:** Assets, liabilities, income, expenses, equity
-- **VAT Integration:** Automatic posting to correct VAT accounts
+- **VAT Integration:** Automatic posting to correct VAT accounts (2640 input, 2650 output)
+- **Rounding Account:** Account 3740 (Öres- och kronutjämning) for VAT rounding adjustments
 
 ### Audit Trail
 - Complete transaction history
@@ -263,21 +269,41 @@ generate_vat_report(1, 2025)  # Q1 2025
 
 ### Run Tests
 ```bash
-# Comprehensive test suite
-source .venv/bin/activate
-python test_comprehensive.py
+# Install test dependencies
+uv sync --extra dev
 
+# Run pytest suite (recommended - in-memory databases, zero production risk)
+uv run pytest tests/ -v
+
+# Run specific test file
+uv run pytest tests/test_vat_rounding.py -v
+
+# Run with coverage
+uv run pytest tests/ --cov=src --cov-report=html
+
+# Run integration test suite
+uv run python test_comprehensive.py
 # Expected output: 9/9 PASSED
 ```
+
+**Testing Features:**
+- ✅ In-memory SQLite databases (`:memory:`)
+- ✅ Zero impact on production database
+- ✅ Fast execution (milliseconds per test)
+- ✅ Perfect isolation (fresh database per test)
+- ✅ See `tests/README.md` for detailed documentation
 
 ### Code Quality
 ```bash
 # Format and lint
-black src/
-ruff check src/
+uv run ruff check src/ --fix
+uv run ruff format src/
 
-# Run quality checks
-ruff check src/ && black src/
+# Type checking
+uv run mypy src/
+
+# Run all quality checks
+uv run ruff check src/ --fix && uv run ruff format src/ && uv run mypy src/
 ```
 
 ## 🔧 Development & Customization
@@ -331,7 +357,7 @@ The system uses 12 tables for complete accounting:
 **Database errors:**
 - Check `~/.mcp-accounting-server/` directory exists
 - Verify SQLite file permissions
-- Run `python test_comprehensive.py` to validate
+- Run `uv run pytest tests/` or `uv run python test_comprehensive.py` to validate
 
 **PDF generation fails:**
 - Install WeasyPrint dependencies

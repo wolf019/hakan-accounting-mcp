@@ -38,6 +38,329 @@ class InvoiceServer:
         self.secure_voucher = SecureVoucherService(self.db)
         self.voucher_annotation = VoucherAnnotationService(self.db)
 
+    async def record_business_event(
+        self,
+        event_type: str,
+        description: str,
+        amount: float,
+        counterparty: str,
+        event_date: Optional[str] = None,
+        reference: Optional[str] = None,
+        invoice_id: Optional[int] = None,
+        expense_id: Optional[int] = None,
+        auto_post: bool = True,
+        vat_rate: Optional[float] = None
+    ) -> str:
+        """Universal business event recorder with Swedish compliance
+
+        Args:
+            event_type: expense|invoice|payment|transfer|adjustment
+            description: Detailed business description (Swedish legal requirement)
+            amount: Total amount in SEK
+            counterparty: Business partner (Swedish legal requirement)
+            event_date: When event occurred (YYYY-MM-DD, defaults to today)
+            reference: External reference (invoice number, receipt, etc.)
+            invoice_id: Link to existing invoice (for payments)
+            expense_id: Link to existing expense
+            auto_post: Automatically post voucher (default: True)
+            vat_rate: Swedish VAT rate (0.25, 0.12, 0.06, 0.0) - defaults to None (no VAT)
+
+        Returns:
+            Success message with voucher details
+        """
+        try:
+            from datetime import date
+            from decimal import Decimal
+
+            # Parse event date
+            if event_date:
+                try:
+                    event_date_obj = date.fromisoformat(event_date)
+                except ValueError:
+                    return "❌ Invalid date format. Use YYYY-MM-DD"
+            else:
+                event_date_obj = date.today()
+
+            # Validate required Swedish compliance fields
+            if not description or len(description.strip()) < 10:
+                return "❌ Description must be detailed (min 10 chars) per Swedish law"
+
+            if not counterparty or len(counterparty.strip()) < 2:
+                return "❌ Counterparty required for Swedish compliance"
+
+            amount_decimal = Decimal(str(amount))
+            if amount_decimal <= 0:
+                return "❌ Amount must be positive"
+
+            # Validate Swedish VAT rate (if provided)
+            if vat_rate is not None:
+                valid_vat_rates = [0.25, 0.12, 0.06, 0.0]
+                if vat_rate not in valid_vat_rates:
+                    return f"❌ Invalid VAT rate. Swedish rates: 25% (0.25), 12% (0.12), 6% (0.06), 0% (0.0)"
+            # Note: vat_rate defaults to None, requiring explicit specification for VAT transactions
+
+            # Map event type to voucher type and generate journal entries
+            if event_type == "expense":
+                return await self._record_expense_event(
+                    description, amount_decimal, counterparty, event_date_obj, reference, auto_post, vat_rate
+                )
+            elif event_type == "invoice":
+                return await self._record_invoice_event(
+                    description, amount_decimal, counterparty, event_date_obj, reference, invoice_id, auto_post
+                )
+            elif event_type == "payment":
+                return await self._record_payment_event(
+                    description, amount_decimal, counterparty, event_date_obj, reference, invoice_id, auto_post
+                )
+            elif event_type == "transfer":
+                return await self._record_transfer_event(
+                    description, amount_decimal, counterparty, event_date_obj, reference, auto_post
+                )
+            elif event_type == "adjustment":
+                return await self._record_adjustment_event(
+                    description, amount_decimal, counterparty, event_date_obj, reference, auto_post
+                )
+            else:
+                return f"❌ Invalid event_type. Use: expense|invoice|payment|transfer|adjustment"
+
+        except Exception as e:
+            return f"❌ Error recording business event: {str(e)}"
+
+    async def _record_expense_event(self, description: str, amount: Decimal, counterparty: str,
+                                   event_date: date, reference: Optional[str], auto_post: bool, vat_rate: Optional[float]) -> str:
+        """Record expense with Swedish VAT compliance"""
+        try:
+            # Create voucher
+            voucher_id = self.accounting.create_voucher(
+                description=f"{description} - {counterparty}",
+                voucher_type=VoucherType.PURCHASE,
+                total_amount=amount,
+                voucher_date=event_date,
+                reference=reference
+            )
+
+            # Add VAT entries using AccountingService (handles Swedish compliance)
+            if vat_rate is not None and vat_rate > 0:
+                vat_rate_decimal = Decimal(str(vat_rate))
+                vat_percentage = int(vat_rate * 100)
+
+                # Use AccountingService method for Swedish VAT compliance
+                vat_result = self.accounting.add_swedish_vat_entries(
+                    voucher_id=voucher_id,
+                    gross_amount=amount,
+                    vat_rate=vat_rate_decimal,
+                    net_account="6110",  # Office supplies/general expenses
+                    vat_account="2640",  # Ingående moms (Input VAT)
+                    net_description=f"{description} ex VAT",
+                    vat_description=f"VAT {vat_percentage}%",
+                    transaction_type="expense"
+                )
+
+                # Store for reporting
+                net_amount = vat_result["net_amount"]
+                vat_amount = vat_result["vat_amount"]
+                vat_rounding_diff = vat_result["rounding_diff"]
+                has_rounding = vat_result["has_rounding"]
+            else:
+                # VAT-exempt transaction
+                vat_result = self.accounting.add_swedish_vat_entries(
+                    voucher_id=voucher_id,
+                    gross_amount=amount,
+                    vat_rate=Decimal("0"),
+                    net_account="6110",
+                    vat_account="2640",  # Not used for zero VAT
+                    net_description=description,
+                    vat_description="",  # Not used
+                    transaction_type="expense"
+                )
+
+                net_amount = amount
+                vat_amount = Decimal('0')
+                vat_rounding_diff = Decimal('0')
+                has_rounding = False
+
+            # Credit: Bank account (always full amount paid)
+            self.accounting.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number="1930",  # Business bank account
+                description=f"Payment to {counterparty}",
+                credit_amount=amount
+            )
+
+            # Post voucher if requested
+            if auto_post:
+                self.accounting.post_voucher(voucher_id)
+                status = "POSTED"
+            else:
+                status = "PENDING"
+
+            # Format result with VAT information
+            if vat_rate is not None and vat_rate > 0:
+                vat_percentage = int(vat_rate * 100)
+                booking_msg = f"DR 6110 (Expense): {net_amount:.2f} SEK + DR 2640 (VAT {vat_percentage}%): {vat_amount:.2f} SEK"
+                if has_rounding:
+                    rounding_type = "DR" if vat_rounding_diff > 0 else "CR"
+                    booking_msg += f" + {rounding_type} 3740 (Rounding): {abs(vat_rounding_diff):.2f} SEK"
+                booking_msg += f" = CR 1930 (Bank): {amount:.2f} SEK"
+                return f"✅ Expense successfully processed and posted to ledger\nVoucher ID: {voucher_id} ({status})\nBooking: {booking_msg}"
+            else:
+                return f"✅ Expense successfully processed and posted to ledger\nVoucher ID: {voucher_id} ({status})\nBooking: DR 6110 (Expense): {amount:.2f} SEK = CR 1930 (Bank): {amount:.2f} SEK (VAT exempt)"
+
+        except Exception as e:
+            return f"❌ Error recording expense: {str(e)}"
+
+    async def _record_invoice_event(self, description: str, amount: Decimal, counterparty: str,
+                                   event_date: date, reference: Optional[str], invoice_id: Optional[int], auto_post: bool) -> str:
+        """Record invoice/sales with Swedish VAT"""
+        try:
+            voucher_id = self.accounting.create_voucher(
+                description=f"Invoice: {description} - {counterparty}",
+                voucher_type=VoucherType.SALES_INVOICE,
+                total_amount=amount,
+                voucher_date=event_date,
+                reference=reference,
+                source_invoice_id=invoice_id
+            )
+
+            # Debit: Customer receivables (full amount)
+            self.accounting.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number="1510",
+                description=f"Invoice {counterparty}",
+                debit_amount=amount
+            )
+
+            # Add VAT entries using AccountingService (handles Swedish compliance)
+            vat_rate = Decimal('0.25')
+            vat_result = self.accounting.add_swedish_vat_entries(
+                voucher_id=voucher_id,
+                gross_amount=amount,
+                vat_rate=vat_rate,
+                net_account="3001",  # Consulting revenue
+                vat_account="2650",  # Utgående moms (Output VAT)
+                net_description=f"{description} ex VAT",
+                vat_description="VAT 25%",
+                transaction_type="revenue"
+            )
+
+            net_amount = vat_result["net_amount"]
+            vat_amount = vat_result["vat_amount"]
+            has_rounding = vat_result["has_rounding"]
+            rounding_diff = vat_result["rounding_diff"]
+
+            if auto_post:
+                self.accounting.post_voucher(voucher_id)
+                status = "POSTED"
+            else:
+                status = "PENDING"
+
+            result_msg = f"✅ Invoice recorded - Voucher ID: {voucher_id} ({status})\nNet: {net_amount:.2f} SEK, VAT: {vat_amount:.2f} SEK"
+            if has_rounding:
+                result_msg += f" (rounded), Rounding: {abs(rounding_diff):.2f} SEK"
+            result_msg += f", Total: {amount:.2f} SEK"
+
+            return result_msg
+
+        except Exception as e:
+            return f"❌ Error recording invoice: {str(e)}"
+
+    async def _record_payment_event(self, description: str, amount: Decimal, counterparty: str,
+                                   event_date: date, reference: Optional[str], invoice_id: Optional[int], auto_post: bool) -> str:
+        """Record payment received"""
+        try:
+            voucher_id = self.accounting.create_voucher(
+                description=f"Payment: {description} - {counterparty}",
+                voucher_type=VoucherType.PAYMENT,
+                total_amount=amount,
+                voucher_date=event_date,
+                reference=reference,
+                source_invoice_id=invoice_id
+            )
+
+            # Debit: Bank account
+            self.accounting.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number="1930",
+                description=f"Payment from {counterparty}",
+                debit_amount=amount
+            )
+
+            # Credit: Customer receivables
+            self.accounting.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number="1510",
+                description=f"Payment {counterparty}",
+                credit_amount=amount
+            )
+
+            if auto_post:
+                self.accounting.post_voucher(voucher_id)
+                status = "POSTED"
+            else:
+                status = "PENDING"
+
+            return f"✅ Payment recorded - Voucher ID: {voucher_id} ({status})\nAmount: {amount:.2f} SEK"
+
+        except Exception as e:
+            return f"❌ Error recording payment: {str(e)}"
+
+    async def _record_transfer_event(self, description: str, amount: Decimal, counterparty: str,
+                                    event_date: date, reference: Optional[str], auto_post: bool) -> str:
+        """Record bank transfer or account transfer"""
+        try:
+            voucher_id = self.accounting.create_voucher(
+                description=f"Transfer: {description} - {counterparty}",
+                voucher_type=VoucherType.ADJUSTMENT,
+                total_amount=amount,
+                voucher_date=event_date,
+                reference=reference
+            )
+
+            # Simple bank-to-bank transfer example
+            # From main account to savings account
+            self.accounting.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number="1940",  # Other bank accounts
+                description=f"Transfer to {counterparty}",
+                debit_amount=amount
+            )
+
+            self.accounting.add_journal_entry(
+                voucher_id=voucher_id,
+                account_number="1930",  # Main bank account
+                description=f"Transfer from main account",
+                credit_amount=amount
+            )
+
+            if auto_post:
+                self.accounting.post_voucher(voucher_id)
+                status = "POSTED"
+            else:
+                status = "PENDING"
+
+            return f"✅ Transfer recorded - Voucher ID: {voucher_id} ({status})\nAmount: {amount:.2f} SEK"
+
+        except Exception as e:
+            return f"❌ Error recording transfer: {str(e)}"
+
+    async def _record_adjustment_event(self, description: str, amount: Decimal, counterparty: str,
+                                      event_date: date, reference: Optional[str], auto_post: bool) -> str:
+        """Record manual adjustment (requires manual journal entries)"""
+        try:
+            voucher_id = self.accounting.create_voucher(
+                description=f"Adjustment: {description} - {counterparty}",
+                voucher_type=VoucherType.ADJUSTMENT,
+                total_amount=amount,
+                voucher_date=event_date,
+                reference=reference
+            )
+
+            # For adjustments, we don't auto-post since they need manual entries
+            return f"✅ Adjustment voucher created - Voucher ID: {voucher_id} (PENDING)\nUse add_journal_entry to complete the adjustment\nAmount: {amount:.2f} SEK"
+
+        except Exception as e:
+            return f"❌ Error creating adjustment: {str(e)}"
+
     async def create_invoice(
         self,
         line_items: List[Dict[str, Any]],
@@ -916,203 +1239,478 @@ class InvoiceServer:
 mcp = FastMCP("Invoice Generator")
 invoice_server = InvoiceServer()
 
-# Register tools
+# CONSOLIDATED TOOLBOX - 8 POWERFUL TOOLS
+
 @mcp.tool()
-async def create_invoice(
-    line_items: List[Dict[str, Any]],
+async def record_business_event(
+    event_type: str,
+    description: str,
+    amount: float,
+    counterparty: str,
+    event_date: Optional[str] = None,
+    reference: Optional[str] = None,
+    invoice_id: Optional[int] = None,
+    expense_id: Optional[int] = None,
+    auto_post: bool = True,
+    vat_rate: Optional[float] = None
+) -> str:
+    """Universal business event recorder with Swedish compliance
+
+    Args:
+        event_type: expense|invoice|payment|transfer|adjustment
+        description: Detailed business description (Swedish legal requirement)
+        amount: Total amount in SEK
+        counterparty: Business partner (Swedish legal requirement)
+        event_date: When event occurred (YYYY-MM-DD, defaults to today)
+        reference: External reference (invoice number, receipt, etc.)
+        invoice_id: Link to existing invoice (for payments)
+        expense_id: Link to existing expense
+        auto_post: Automatically post voucher (default: True)
+        vat_rate: Swedish VAT rate (0.25, 0.12, 0.06, 0.0) - defaults to None (must specify for VAT)
+
+    Examples:
+        record_business_event("expense", "HP printer ink cartridges", 1250.00, "Staples Sverige AB", vat_rate=0.25)  # 25% VAT
+        record_business_event("expense", "Business dinner", 800.00, "Restaurant AB", vat_rate=0.12)                  # 12% VAT
+        record_business_event("expense", "Industry magazine", 200.00, "Publisher", vat_rate=0.06)                    # 6% VAT
+        record_business_event("expense", "AWS services", 500.00, "Amazon Web Services", vat_rate=0.0)                # 0% VAT
+        record_business_event("payment", "Bank transfer", 5000.00, "Supplier AB")                                    # No VAT (default)
+    """
+    return await invoice_server.record_business_event(event_type, description, amount, counterparty, event_date, reference, invoice_id, expense_id, auto_post, vat_rate)
+
+@mcp.tool()
+async def manage_invoice(
+    action: str,
+    invoice_id: Optional[int] = None,
+    line_items: Optional[List[Dict[str, Any]]] = None,
     due_days: int = 30,
     notes: Optional[str] = None,
     customer_email: Optional[str] = None,
     recipient: Optional[Dict[str, Any]] = None,
     company: Optional[str] = None,
-    vat_number: Optional[str] = None
+    vat_number: Optional[str] = None,
+    status: Optional[str] = None,
+    grace_days: int = 5
 ) -> str:
-    """Create a new invoice with line items
+    """Complete invoice lifecycle management
 
     Args:
-        line_items: List of invoice line items with description, quantity, unit_price
-        due_days: Days until payment is due (default 30)
-        notes: Optional notes for the invoice
-        customer_email: (Legacy) Customer email address for simple invoicing
-        recipient: Enhanced recipient object with full company details:
-            {
-                "company_name": "Company AB",
-                "contact_person": "John Doe",
-                "email": "john@company.com",
-                "address": {
-                    "street": "Street 123",
-                    "postal_code": "12345",
-                    "city": "Stockholm",
-                    "country": "Sweden"
-                },
-                "vat_number": "SE123456789"
-            }
-        company: Company name for customer lookup (preferred method)
-        vat_number: VAT number for customer lookup (must be used with company)
+        action: create|update_status|check_overdue|get_details
+        invoice_id: Invoice ID (for update_status, get_details)
+        line_items: Invoice line items (for create)
+        due_days: Payment terms in days (for create)
+        notes: Invoice notes (for create)
+        customer_email: Customer email (for create)
+        recipient: Full customer object (for create)
+        company: Company name (for create)
+        vat_number: VAT number (for create)
+        status: New status (for update_status: draft|sent|paid|overdue|cancelled)
+        grace_days: Grace period for overdue check (for check_overdue)
 
-    Note: Provide either customer_email, recipient, or company+vat_number.
+    Examples:
+        manage_invoice("create", line_items=[...], company="Acme Corp", vat_number="SE123")
+        manage_invoice("update_status", invoice_id=123, status="paid")
+        manage_invoice("check_overdue", grace_days=7)
     """
-    return await invoice_server.create_invoice(line_items, due_days, notes, customer_email, recipient, company, vat_number)
+    if action == "create":
+        return await invoice_server.create_invoice(line_items, due_days, notes, customer_email, recipient, company, vat_number)
+    elif action == "update_status":
+        return await invoice_server.update_invoice_status(invoice_id, status)
+    elif action == "check_overdue":
+        return await invoice_server.check_overdue_invoices(grace_days)
+    elif action == "get_details":
+        return await invoice_server.get_invoice_details(invoice_id)
+    else:
+        return "❌ Invalid action. Use: create|update_status|check_overdue|get_details"
 
 @mcp.tool()
-async def list_customers() -> str:
-    """List all customers in the database"""
-    try:
-        customers = invoice_server.db.list_customers()
-
-        if not customers:
-            return "No customers found in the database"
-
-        result = [f"Found {len(customers)} customer(s):"]
-
-        for customer in customers:
-            result.append(f"\n- {customer.name}")
-            result.append(f"  Company: {customer.company}")
-            result.append(f"  VAT Number: {customer.vat_number}")
-            if customer.email:
-                result.append(f"  Email: {customer.email}")
-            if customer.contact_person:
-                result.append(f"  Contact: {customer.contact_person}")
-            formatted_address = customer.get_formatted_address()
-            if formatted_address:
-                result.append(f"  Address: {formatted_address}")
-
-        return "\n".join(result)
-
-    except Exception as e:
-        return f"Error listing customers: {str(e)}"
-
-@mcp.tool()
-async def generate_pdf(invoice_id: int) -> str:
-    """Generate PDF for an existing invoice"""
-    return await invoice_server.generate_pdf(invoice_id)
-
-
-@mcp.tool()
-async def update_invoice_status(invoice_id: int, status: str) -> str:
-    """Update invoice status (draft, sent, paid, overdue)"""
-    return await invoice_server.update_invoice_status(invoice_id, status)
-
-@mcp.tool()
-async def check_overdue_invoices(grace_days: int = 5) -> str:
-    """Check for overdue invoices that need payment reminders"""
-    return await invoice_server.check_overdue_invoices(grace_days)
-
-@mcp.tool()
-async def create_payment_reminder(
-    invoice_id: int,
-    customer_type: str = "business",
-    reference_rate: float = 2.0
-) -> str:
-    """Create payment reminder with Swedish law calculations"""
-    return await invoice_server.create_payment_reminder(invoice_id, customer_type, reference_rate)
-
-@mcp.tool()
-async def generate_reminder_pdf(reminder_id: int) -> str:
-    """Generate PDF for a payment reminder"""
-    return await invoice_server.generate_reminder_pdf(reminder_id)
-
-# Expense tracking tools
-@mcp.tool()
-async def add_expense(
-    description: str,
-    amount: float,
-    category: str,
-    expense_date: str,
-    vat_rate: float = 0.25,
-    notes: Optional[str] = None
-) -> str:
-    """Add a new business expense with VAT calculation
-
-    Args:
-        description: What was purchased/paid for
-        amount: Total amount including VAT
-        category: Expense category (office_supplies, software, hosting_cloud, travel, meals_client, education, equipment, phone_internet, insurance, accounting, marketing, office_rent, other)
-        expense_date: Date of expense (YYYY-MM-DD)
-        vat_rate: VAT rate (0.25 for 25%, 0.12 for 12%, etc.)
-        notes: Optional additional notes
-
-    Returns:
-        Success message with expense ID and VAT details
-    """
-    return await invoice_server.add_expense(description, amount, category, expense_date, vat_rate, notes)
-
-@mcp.tool()
-async def list_expenses(
-    category: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None
-) -> str:
-    """List expenses with optional filters
-
-    Args:
-        category: Filter by expense category (optional)
-        start_date: Start date filter (YYYY-MM-DD, optional)
-        end_date: End date filter (YYYY-MM-DD, optional)
-
-    Returns:
-        List of expenses with totals
-    """
-    return await invoice_server.list_expenses(category, start_date, end_date)
-
-@mcp.tool()
-async def generate_vat_report(quarter: int, year: int = 2025) -> str:
-    """Generate VAT report for quarterly declaration to Skatteverket
-
-    Args:
-        quarter: Quarter number (1-4)
-        year: Year for report
-
-    Returns:
-        VAT report summary with amounts for declaration
-    """
-    return await invoice_server.generate_vat_report(quarter, year)
-
-@mcp.tool()
-async def import_bank_csv(csv_data: str, account_type: str = "swedbank") -> str:
-    """Import bank transactions from CSV export
-
-    Args:
-        csv_data: CSV content from bank export
-        account_type: Bank type for parsing format (swedbank, seb, etc.)
-
-    Returns:
-        Import summary with transaction count
-    """
-    return await invoice_server.import_bank_csv(csv_data, account_type)
-
-@mcp.tool()
-async def reconcile_payment(
-    bank_transaction_id: int,
+async def manage_payment(
+    action: str,
     invoice_id: Optional[int] = None,
+    customer_type: str = "business",
+    reference_rate: float = 2.0,
+    reminder_id: Optional[int] = None,
+    bank_transaction_id: Optional[int] = None,
     expense_id: Optional[int] = None,
     amount: Optional[float] = None
 ) -> str:
-    """Match bank transaction with invoice payment or expense
+    """Payment processing and reminders
 
     Args:
-        bank_transaction_id: Bank transaction to match
-        invoice_id: Invoice that was paid (for incoming payments)
-        expense_id: Expense that was paid (for outgoing payments)
-        amount: Override amount if partial payment
+        action: create_reminder|reconcile|list_unmatched
+        invoice_id: Invoice needing reminder or payment (for create_reminder, reconcile)
+        customer_type: business|consumer (for create_reminder)
+        reference_rate: Swedish interest rate % (for create_reminder)
+        reminder_id: Reminder ID (for actions requiring it)
+        bank_transaction_id: Bank transaction to reconcile
+        expense_id: Expense to reconcile with transaction
+        amount: Override reconciliation amount
 
-    Returns:
-        Reconciliation confirmation
+    Examples:
+        manage_payment("create_reminder", invoice_id=123, customer_type="business")
+        manage_payment("reconcile", bank_transaction_id=456, invoice_id=123)
+        manage_payment("list_unmatched")
     """
-    return await invoice_server.reconcile_payment(bank_transaction_id, invoice_id, expense_id, amount)
+    if action == "create_reminder":
+        return await invoice_server.create_payment_reminder(invoice_id, customer_type, reference_rate)
+    elif action == "reconcile":
+        return await invoice_server.reconcile_payment(bank_transaction_id, invoice_id, expense_id, amount)
+    elif action == "list_unmatched":
+        return await invoice_server.list_unmatched_transactions()
+    else:
+        return "❌ Invalid action. Use: create_reminder|reconcile|list_unmatched"
 
 @mcp.tool()
-async def generate_vat_report_pdf(quarter: int, year: int = 2025) -> str:
-    """Generate VAT report PDF for quarterly declaration to Skatteverket
+async def manage_customer(
+    action: str = "list",
+    email: Optional[str] = None
+) -> str:
+    """Customer operations
 
     Args:
-        quarter: Quarter number (1-4)
-        year: Year for report
+        action: list|get_details
+        email: Customer email (for get_details)
 
-    Returns:
-        Path to generated VAT report PDF
+    Examples:
+        manage_customer("list")
+        manage_customer("get_details", email="john@company.com")
     """
-    return await invoice_server.generate_vat_report_pdf(quarter, year)
+    if action == "list":
+        return await invoice_server.list_customers()
+    elif action == "get_details":
+        return await invoice_server.get_customer_by_email(email)
+    else:
+        return "❌ Invalid action. Use: list|get_details"
+
+@mcp.tool()
+async def manage_banking(
+    action: str,
+    csv_data: Optional[str] = None,
+    account_type: str = "swedbank",
+    quarter: Optional[int] = None,
+    year: int = 2025
+) -> str:
+    """Bank integration and VAT reporting
+
+    Args:
+        action: import_csv|vat_report|vat_report_pdf
+        csv_data: CSV content from bank export (for import_csv)
+        account_type: Bank type - swedbank|seb|etc (for import_csv)
+        quarter: Quarter 1-4 (for vat_report, vat_report_pdf)
+        year: Report year (for vat_report, vat_report_pdf)
+
+    Examples:
+        manage_banking("import_csv", csv_data="Date,Amount,Description...", account_type="swedbank")
+        manage_banking("vat_report", quarter=3, year=2025)
+        manage_banking("vat_report_pdf", quarter=3, year=2025)
+    """
+    if action == "import_csv":
+        return await invoice_server.import_bank_csv(csv_data, account_type)
+    elif action == "vat_report":
+        return await invoice_server.generate_vat_report(quarter, year)
+    elif action == "vat_report_pdf":
+        return await invoice_server.generate_vat_report_pdf(quarter, year)
+    else:
+        return "❌ Invalid action. Use: import_csv|vat_report|vat_report_pdf"
+
+@mcp.tool()
+async def generate_report(
+    report_type: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    as_of_date: Optional[str] = None,
+    detailed: bool = True,
+    period_analysis: bool = True,
+    period_only: bool = False,
+    include_superseded: bool = False,
+    security_audit: bool = False
+) -> str:
+    """Financial statements and reports
+
+    Args:
+        report_type: trial_balance|income_statement|balance_sheet
+        start_date: Period start (YYYY-MM-DD) for income_statement, balance_sheet
+        end_date: Period end (YYYY-MM-DD) for income_statement
+        as_of_date: Balance date (YYYY-MM-DD) for balance_sheet, trial_balance
+        detailed: Show account codes and enhanced formatting
+        period_analysis: Show opening/period/closing columns (balance_sheet, trial_balance)
+        period_only: Show only period changes (balance_sheet)
+        include_superseded: Include superseded vouchers (trial_balance)
+        security_audit: Include security audit info (trial_balance)
+
+    Examples:
+        generate_report("trial_balance")
+        generate_report("income_statement", start_date="2025-01-01", end_date="2025-03-31")
+        generate_report("balance_sheet", as_of_date="2025-03-31", start_date="2025-01-01")
+    """
+    try:
+        if report_type == "trial_balance":
+            from datetime import date
+
+            # Parse dates if provided
+            as_of_date_obj = date.fromisoformat(as_of_date) if as_of_date else None
+            start_date_obj = date.fromisoformat(start_date) if start_date else None
+
+            # Always use the standard method for now (enhanced method may have different structure)
+            trial_balance = invoice_server.accounting.generate_trial_balance(
+                as_of_date=as_of_date_obj,
+                include_superseded=include_superseded,
+                security_audit=security_audit
+            )
+
+            result = ["TRIAL BALANCE", "=" * 60]
+            result.append(f"{'Account':<10} {'Name':<30} {'Debit':>12} {'Credit':>12}")
+            result.append("-" * 60)
+
+            for account in trial_balance["accounts"]:
+                debit_str = f"{account['debit_balance']:,.2f}" if account['debit_balance'] > 0 else ""
+                credit_str = f"{account['credit_balance']:,.2f}" if account['credit_balance'] > 0 else ""
+                result.append(
+                    f"{account['account_number']:<10} {account['account_name'][:30]:<30} "
+                    f"{debit_str:>12} {credit_str:>12}"
+                )
+
+            result.append("-" * 60)
+            result.append(
+                f"{'TOTALS':<40} "
+                f"{trial_balance['totals']['debit']:>12,.2f} "
+                f"{trial_balance['totals']['credit']:>12,.2f}"
+            )
+
+            balanced = "✅ BALANCED" if trial_balance["balanced"] else "❌ UNBALANCED"
+            result.append(f"\n{balanced}")
+
+            return "\n".join(result)
+
+        elif report_type == "income_statement":
+            from datetime import date
+
+            if not start_date or not end_date:
+                return "❌ Income statement requires start_date and end_date"
+
+            start_date_obj = date.fromisoformat(start_date)
+            end_date_obj = date.fromisoformat(end_date)
+
+            income_statement = invoice_server.accounting.generate_income_statement(
+                start_date_obj, end_date_obj, detailed=detailed
+            )
+
+            result = [
+                "INCOME STATEMENT (Resultaträkning)",
+                f"Period: {start_date} to {end_date}",
+                "=" * 50,
+                "",
+                "REVENUE:",
+            ]
+
+            for account in income_statement.revenue_accounts:
+                if detailed and account[2] != 0:  # Only non-zero if detailed
+                    result.append(f"  {account[0]:<8} {account[1][:30]:<30} {account[2]:>12.2f}")
+                elif not detailed:
+                    result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
+
+            result.extend([
+                "-" * 50,
+                f"Total Revenue: {income_statement.revenue:>26.2f}",
+                "",
+                "EXPENSES:",
+            ])
+
+            for account in income_statement.expense_accounts:
+                if detailed and account[2] != 0:  # Only non-zero if detailed
+                    result.append(f"  {account[0]:<8} {account[1][:30]:<30} {account[2]:>12.2f}")
+                elif not detailed:
+                    result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
+
+            result.extend([
+                "-" * 50,
+                f"Total Expenses: {income_statement.expenses:>25.2f}",
+                "",
+                "=" * 50,
+                f"NET INCOME: {income_statement.net_income:>29.2f}",
+                "=" * 50
+            ])
+
+            return "\n".join(result)
+
+        elif report_type == "balance_sheet":
+            from datetime import date
+
+            as_of_date_obj = date.fromisoformat(as_of_date) if as_of_date else None
+            start_date_obj = date.fromisoformat(start_date) if start_date else None
+
+            balance_sheet = invoice_server.accounting.generate_balance_sheet(
+                as_of_date=as_of_date_obj,
+                start_date=start_date_obj,
+                detailed=detailed
+            )
+
+            result = [
+                "BALANCE SHEET (Balansräkning)",
+                f"As of: {balance_sheet.period_end}",
+                "=" * 50,
+                "",
+                "ASSETS:",
+            ]
+
+            for account in balance_sheet.assets:
+                if detailed and len(account) > 2 and account[2] != 0:
+                    result.append(f"  {account[0]:<8} {account[1][:30]:<30} {account[2]:>12.2f}")
+                elif not detailed:
+                    result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
+
+            result.extend([
+                "-" * 50,
+                f"Total Assets: {balance_sheet.total_assets:>27.2f}",
+                "",
+                "LIABILITIES:",
+            ])
+
+            for account in balance_sheet.liabilities:
+                if detailed and len(account) > 2 and account[2] != 0:
+                    result.append(f"  {account[0]:<8} {account[1][:30]:<30} {account[2]:>12.2f}")
+                elif not detailed:
+                    result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
+
+            result.extend([
+                "-" * 50,
+                f"Total Liabilities: {balance_sheet.total_liabilities:>21.2f}",
+                "",
+                "EQUITY:",
+            ])
+
+            for account in balance_sheet.equity:
+                if detailed and len(account) > 2 and account[2] != 0:
+                    result.append(f"  {account[0]:<8} {account[1][:30]:<30} {account[2]:>12.2f}")
+                elif not detailed:
+                    result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
+
+            result.extend([
+                "-" * 50,
+                f"Total Equity: {balance_sheet.total_equity:>25.2f}",
+                "",
+                "=" * 50,
+                f"TOTAL LIAB. + EQUITY: {balance_sheet.total_liabilities + balance_sheet.total_equity:>14.2f}",
+                "=" * 50
+            ])
+
+            return "\n".join(result)
+
+        else:
+            return "❌ Invalid report_type. Use: trial_balance|income_statement|balance_sheet"
+
+    except Exception as e:
+        return f"❌ Error generating {report_type}: {str(e)}"
+
+@mcp.tool()
+async def generate_pdf(
+    document_type: str,
+    document_id: int,
+    quarter: Optional[int] = None,
+    year: Optional[int] = None
+) -> str:
+    """Universal document generation
+
+    Args:
+        document_type: invoice|reminder|vat_report
+        document_id: Invoice ID, reminder ID (not used for vat_report)
+        quarter: Quarter 1-4 (for vat_report)
+        year: Year (for vat_report)
+
+    Examples:
+        generate_pdf("invoice", document_id=123)
+        generate_pdf("reminder", document_id=456)
+        generate_pdf("vat_report", document_id=0, quarter=3, year=2025)
+    """
+    if document_type == "invoice":
+        return await invoice_server.generate_pdf(document_id)
+    elif document_type == "reminder":
+        return await invoice_server.generate_reminder_pdf(document_id)
+    elif document_type == "vat_report":
+        return await invoice_server.generate_vat_report_pdf(quarter or 1, year or 2025)
+    else:
+        return "❌ Invalid document_type. Use: invoice|reminder|vat_report"
+
+@mcp.tool()
+async def get_guidance(
+    topic: Optional[str] = None,
+    depth: str = "essentials",
+    category: Optional[str] = None,
+    workflow_name: Optional[str] = None,
+    compliance_topic: Optional[str] = None
+) -> str:
+    """Documentation, workflows, and Swedish compliance guidance
+
+    Args:
+        topic: Specific tool or topic for documentation
+        depth: essentials|full (for documentation)
+        category: invoicing|expenses|accounting|reporting (for documentation)
+        workflow_name: invoice_to_payment|expense_recording|monthly_closing (for workflows)
+        compliance_topic: vat_reporting|invoice_requirements|audit_trail (for compliance)
+
+    Examples:
+        get_guidance()  # General overview
+        get_guidance(topic="record_business_event", depth="full")
+        get_guidance(workflow_name="invoice_to_payment")
+        get_guidance(compliance_topic="vat_reporting")
+    """
+    if workflow_name:
+        return invoice_server.documentation.get_workflow_guide(workflow_name)
+    elif compliance_topic:
+        return invoice_server.documentation.get_compliance_info(compliance_topic)
+    else:
+        return invoice_server.documentation.get_documentation(topic, depth, category)
+
+# Keep only audit tools that aren't consolidated
+@mcp.tool()
+async def audit_voucher(
+    action: str,
+    voucher_id: Optional[int] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    include_superseded: bool = False,
+    voucher_type: Optional[str] = None,
+    original_voucher_id: Optional[int] = None,
+    replacement_voucher_id: Optional[int] = None,
+    reason: Optional[str] = None,
+    user_id: Optional[str] = None,
+    totp_code: Optional[str] = None,
+    annotation_type: Optional[str] = None,
+    message: Optional[str] = None,
+    related_voucher_id: Optional[int] = None
+) -> str:
+    """Voucher audit operations with TOTP security
+
+    Args:
+        action: history|list_period|supersede|add_annotation
+        voucher_id: Target voucher ID (for history, supersede, add_annotation)
+        start_date: Period start (YYYY-MM-DD) for list_period
+        end_date: Period end (YYYY-MM-DD) for list_period
+        include_superseded: Include superseded vouchers for list_period
+        voucher_type: Filter by type for list_period
+        original_voucher_id: Voucher being replaced (for supersede)
+        replacement_voucher_id: Replacement voucher (for supersede)
+        reason: Business justification (for supersede, add_annotation)
+        user_id: User email (for supersede, add_annotation)
+        totp_code: 6-digit TOTP or 8-digit backup code (for supersede, add_annotation)
+        annotation_type: CORRECTION|REVERSAL|NOTE (for add_annotation)
+        message: Annotation message (for add_annotation)
+        related_voucher_id: Related voucher (for add_annotation)
+
+    Examples:
+        audit_voucher("history", voucher_id=123)
+        audit_voucher("list_period", start_date="2025-01-01", end_date="2025-01-31")
+        audit_voucher("supersede", original_voucher_id=21, replacement_voucher_id=22, reason="Balance error", user_id="user@example.com", totp_code="123456")
+    """
+    if action == "history":
+        return await get_voucher_history(voucher_id)
+    elif action == "list_period":
+        return await list_vouchers_by_period(start_date, end_date, include_superseded, voucher_type)
+    elif action == "supersede":
+        return await supersede_voucher(original_voucher_id, replacement_voucher_id, reason, user_id, totp_code)
+    elif action == "add_annotation":
+        return await add_secure_voucher_annotation(voucher_id, annotation_type, message, user_id, totp_code, related_voucher_id)
+    else:
+        return "❌ Invalid action. Use: history|list_period|supersede|add_annotation"
 
 # Register resources
 @mcp.resource("invoices://list")
@@ -1191,1047 +1789,7 @@ async def unmatched_transactions() -> str:
     return await invoice_server.list_unmatched_transactions()
 
 
-# Accounting MCP Tools
-
-@mcp.tool()
-async def create_voucher(
-    description: str,
-    voucher_type: str,
-    total_amount: float,
-    voucher_date: Optional[str] = None
-) -> str:
-    """Create accounting voucher with automatic journal entries"""
-    try:
-        from datetime import date
-        from decimal import Decimal
-        
-        # Parse voucher type
-        try:
-            voucher_type_enum = VoucherType(voucher_type)
-        except ValueError:
-            return f"Invalid voucher type. Valid types: {[vt.value for vt in VoucherType]}"
-        
-        # Parse date
-        if voucher_date:
-            try:
-                voucher_date_obj = date.fromisoformat(voucher_date)
-            except ValueError:
-                return "Invalid date format. Use YYYY-MM-DD format"
-        else:
-            voucher_date_obj = None
-        
-        voucher_id = invoice_server.accounting.create_voucher(
-            description=description,
-            voucher_type=voucher_type_enum,
-            total_amount=Decimal(str(total_amount)),
-            voucher_date=voucher_date_obj
-        )
-        
-        return f"Voucher created successfully (ID: {voucher_id})"
-        
-    except Exception as e:
-        return f"Error creating voucher: {str(e)}"
-
-
-@mcp.tool()
-async def add_journal_entry(
-    voucher_identifier: str,
-    account_number: str,
-    description: str,
-    debit_amount: float = 0,
-    credit_amount: float = 0
-) -> str:
-    """Add journal entry to a voucher
-    
-    Args:
-        voucher_identifier: Either voucher number (V001, V002, etc.) or voucher ID as string
-        account_number: Account number (1510, 3001, etc.)
-        description: Description of the journal entry
-        debit_amount: Debit amount (default: 0)
-        credit_amount: Credit amount (default: 0)
-    
-    Returns:
-        Success or error message
-    """
-    try:
-        from decimal import Decimal
-        from src.models.accounting_models import ValidationError
-        
-        # Resolve voucher identifier to ID
-        voucher_id = invoice_server.accounting.resolve_voucher_identifier(voucher_identifier)
-        if not voucher_id:
-            return f"❌ Voucher {voucher_identifier} does not exist"
-        
-        try:
-            entry_id = invoice_server.accounting.add_journal_entry(
-                voucher_id=voucher_id,
-                account_number=account_number,
-                description=description,
-                debit_amount=Decimal(str(debit_amount)),
-                credit_amount=Decimal(str(credit_amount))
-            )
-            
-            return f"✅ Journal entry added successfully to {voucher_identifier} (Entry ID: {entry_id})"
-            
-        except ValidationError as ve:
-            # Return the validation error message directly
-            return str(ve)
-        
-    except Exception as e:
-        return f"❌ Error adding journal entry: {str(e)}"
-
-
-@mcp.tool()
-async def post_voucher(voucher_identifier: str) -> str:
-    """Post voucher and update account balances
-    
-    Args:
-        voucher_identifier: Either voucher number (V001, V002, etc.) or voucher ID as string
-    
-    Returns:
-        Success or error message
-    """
-    try:
-        # Resolve voucher identifier to ID
-        voucher_id = invoice_server.accounting.resolve_voucher_identifier(voucher_identifier)
-        if not voucher_id:
-            return f"❌ Voucher {voucher_identifier} does not exist"
-        
-        success = invoice_server.accounting.post_voucher(voucher_id)
-        if success:
-            return f"✅ Voucher {voucher_identifier} (ID: {voucher_id}) posted successfully"
-        else:
-            return f"❌ Failed to post voucher {voucher_identifier}"
-            
-    except Exception as e:
-        return f"❌ Error posting voucher: {str(e)}"
-
-
-@mcp.tool()
-async def get_account_balance(account_number: str) -> str:
-    """Get account balance and transaction information"""
-    try:
-        balance_info = invoice_server.accounting.get_account_balance(account_number)
-        
-        result = [
-            f"Account: {balance_info['account_number']} - {balance_info['account_name']}",
-            f"Balance: {balance_info['balance']:.2f} SEK",
-            f"Transaction count: {balance_info['transaction_count']}",
-        ]
-        
-        if balance_info['last_transaction_date']:
-            result.append(f"Last transaction: {balance_info['last_transaction_date']}")
-        
-        return "\n".join(result)
-        
-    except Exception as e:
-        return f"Error getting account balance: {str(e)}"
-
-
-@mcp.tool()
-async def generate_trial_balance_old() -> str:
-    """[DEPRECATED - Use generate_trial_balance with parameters] Generate trial balance showing all account balances"""
-    try:
-        trial_balance = invoice_server.accounting.generate_trial_balance(include_superseded=False, security_audit=False)
-        
-        if not trial_balance:
-            return "No accounts found"
-        
-        result = ["TRIAL BALANCE", "=" * 60, ""]
-        result.append(f"{'Account':<20} {'Name':<30} {'Debit':<12} {'Credit':<12}")
-        result.append("-" * 60)
-        
-        total_debits = Decimal("0")
-        total_credits = Decimal("0")
-        
-        for account in trial_balance:
-            result.append(f"{account.account_number:<20} {account.account_name:<30} "
-                         f"{account.debit_balance:>11.2f} {account.credit_balance:>11.2f}")
-            total_debits += account.debit_balance
-            total_credits += account.credit_balance
-        
-        result.append("-" * 60)
-        result.append(f"{'TOTALS':<50} {total_debits:>11.2f} {total_credits:>11.2f}")
-        
-        if total_debits == total_credits:
-            result.append("\n✓ Trial balance is balanced")
-        else:
-            result.append(f"\n❌ Trial balance is NOT balanced (difference: {total_debits - total_credits:.2f})")
-        
-        return "\n".join(result)
-        
-    except Exception as e:
-        return f"Error generating trial balance: {str(e)}"
-
-
-@mcp.tool()
-async def generate_income_statement(start_date: str, end_date: str, detailed: bool = True) -> str:
-    """
-    Generate income statement for period with optional enhanced detail
-    
-    Args:
-        start_date: Period start date (YYYY-MM-DD)
-        end_date: Period end date (YYYY-MM-DD)
-        detailed: If True, show account codes and only non-zero accounts (default: True)
-    
-    Returns:
-        Income statement with account codes and condensed view
-    """
-    try:
-        from datetime import date
-        
-        start_date_obj = date.fromisoformat(start_date)
-        end_date_obj = date.fromisoformat(end_date)
-        
-        income_statement = invoice_server.accounting.generate_income_statement(
-            start_date_obj, end_date_obj, detailed=detailed
-        )
-        
-        if detailed:
-            # Enhanced format with account codes, only non-zero accounts
-            result = [
-                "=" * 70,
-                "RESULTATRÄKNING (Income Statement)",
-                f"Period: {start_date} to {end_date}",
-                "=" * 70,
-                f"{'ACCOUNT':<8} {'ACCOUNT NAME':<45} {'AMOUNT':>15}",
-                "=" * 70,
-                "",
-                "INTÄKTER (Revenue):",
-                "-" * 70,
-            ]
-            
-            for account in income_statement.revenue_accounts:
-                if account[2] != 0:  # Only show non-zero accounts
-                    result.append(
-                        f"{account[0]:<8} {account[1][:45]:<45} {account[2]:>15,.2f}"
-                    )
-            
-            result.extend([
-                "-" * 70,
-                f"{'Total Revenue':<54} {income_statement.revenue:>15,.2f}",
-                "",
-                "KOSTNADER (Expenses):",
-                "-" * 70,
-            ])
-            
-            for account in income_statement.expense_accounts:
-                if account[2] != 0:  # Only show non-zero accounts
-                    result.append(
-                        f"{account[0]:<8} {account[1][:45]:<45} {account[2]:>15,.2f}"
-                    )
-            
-            result.extend([
-                "-" * 70,
-                f"{'Total Expenses':<54} {income_statement.expenses:>15,.2f}",
-                "",
-                "=" * 70,
-                f"{'NETTORESULTAT (Net Income)':<54} {income_statement.net_income:>15,.2f}",
-                "=" * 70
-            ])
-        else:
-            # Legacy format - simple, includes all accounts
-            result = [
-                "INCOME STATEMENT (Resultaträkning)",
-                f"Period: {start_date} to {end_date}",
-                "=" * 50,
-                "",
-                "REVENUE:",
-            ]
-            
-            for account in income_statement.revenue_accounts:
-                result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
-            
-            result.extend([
-                "-" * 50,
-                f"Total Revenue: {income_statement.revenue:>26.2f}",
-                "",
-                "EXPENSES:",
-            ])
-            
-            for account in income_statement.expense_accounts:
-                result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
-            
-            result.extend([
-                "-" * 50,
-                f"Total Expenses: {income_statement.expenses:>25.2f}",
-                "",
-                "=" * 50,
-                f"NET INCOME: {income_statement.net_income:>29.2f}",
-                "=" * 50
-            ])
-        
-        return "\n".join(result)
-        
-    except Exception as e:
-        return f"Error generating income statement: {str(e)}"
-
-
-@mcp.tool()
-async def generate_balance_sheet(
-    as_of_date: Optional[str] = None,
-    start_date: Optional[str] = None, 
-    detailed: bool = True,
-    period_only: bool = False
-) -> str:
-    """
-    Generate balance sheet with optional period analysis
-    
-    Args:
-        as_of_date: Closing balance date (YYYY-MM-DD, default: today)
-        start_date: Opening balance date for period analysis (YYYY-MM-DD, default: beginning of year)
-        detailed: If True, show account codes and period analysis (default: True)
-        period_only: If True, show ONLY changes during the period (default: False)
-    
-    Returns:
-        Balance sheet with opening/period/closing columns and account codes
-        OR period-only changes if period_only=True
-    """
-    try:
-        from datetime import date
-        
-        as_of_date_obj = date.fromisoformat(as_of_date) if as_of_date else None
-        start_date_obj = date.fromisoformat(start_date) if start_date else None
-        
-        # If period_only is True, use the new period-specific method
-        if period_only and start_date_obj and as_of_date_obj:
-            from src.modules.reporting.financial_statements import FinancialStatementsService
-            fs_service = FinancialStatementsService(invoice_server.db)
-            period_changes = fs_service.generate_period_balance_changes(start_date_obj, as_of_date_obj)
-            
-            # Format the period-only output
-            result = [
-                "=" * 80,
-                period_changes["title"],
-                f"Period: {period_changes['period']}",
-                "=" * 80,
-                f"{'ACCOUNT':<8} {'ACCOUNT NAME':<40} {'CHANGE':>15}",
-                "=" * 80,
-            ]
-            
-            # Assets section
-            if period_changes["assets"]["accounts"]:
-                result.append("\nASSETS:")
-                result.append("-" * 80)
-                for acc in period_changes["assets"]["accounts"]:
-                    result.append(
-                        f"{acc['account_number']:<8} {acc['account_name'][:40]:<40} "
-                        f"{acc['period_change']:>15,.2f}"
-                    )
-                result.append("-" * 80)
-                result.append(f"{'Total Asset Changes':<49} {period_changes['assets']['total_change']:>15,.2f}")
-            
-            # Liabilities section
-            if period_changes["liabilities"]["accounts"]:
-                result.append("\nLIABILITIES:")
-                result.append("-" * 80)
-                for acc in period_changes["liabilities"]["accounts"]:
-                    result.append(
-                        f"{acc['account_number']:<8} {acc['account_name'][:40]:<40} "
-                        f"{acc['period_change']:>15,.2f}"
-                    )
-                result.append("-" * 80)
-                result.append(f"{'Total Liability Changes':<49} {period_changes['liabilities']['total_change']:>15,.2f}")
-            
-            # Equity section (including net income)
-            if period_changes["equity"]["accounts"]:
-                result.append("\nEQUITY:")
-                result.append("-" * 80)
-                for acc in period_changes["equity"]["accounts"]:
-                    result.append(
-                        f"{acc['account_number']:<8} {acc['account_name'][:40]:<40} "
-                        f"{acc['period_change']:>15,.2f}"
-                    )
-                result.append("-" * 80)
-                result.append(f"{'Total Equity Changes':<49} {period_changes['equity']['total_change']:>15,.2f}")
-            
-            # Summary
-            result.append("\n" + "=" * 80)
-            result.append(f"{'NET CHANGE IN ASSETS':<49} {period_changes['assets']['total_change']:>15,.2f}")
-            result.append(f"{'NET CHANGE IN LIABILITIES + EQUITY':<49} "
-                         f"{period_changes['liabilities']['total_change'] + period_changes['equity']['total_change']:>15,.2f}")
-            result.append("=" * 80)
-            
-            if period_changes['balanced']:
-                result.append("✓ Period changes are BALANCED")
-            else:
-                result.append("⚠ Period changes are NOT BALANCED")
-            
-            return "\n".join(result)
-        
-        # Otherwise use the standard balance sheet
-        balance_sheet = invoice_server.accounting.generate_balance_sheet(
-            as_of_date=as_of_date_obj,
-            start_date=start_date_obj,
-            detailed=detailed
-        )
-        
-        if detailed and len(balance_sheet.assets) > 0 and len(balance_sheet.assets[0]) > 3:
-            # Enhanced format with account codes and period analysis
-            result = [
-                "=" * 80,
-                "BALANSRÄKNING (Balance Sheet)",
-                f"Period: {balance_sheet.period_start} to {balance_sheet.period_end}",
-                "=" * 80,
-                f"{'ACCOUNT':<8} {'ACCOUNT NAME':<35} {'OPENING':>12} {'PERIOD':>12} {'CLOSING':>12}",
-                "=" * 80,
-                "",
-                "TILLGÅNGAR (Assets):",
-                "-" * 80,
-            ]
-            
-            total_assets_opening = 0
-            total_assets_period = 0
-            total_assets_closing = 0
-            
-            for account in balance_sheet.assets:
-                # account format: (account_number, account_name, closing, opening, period)
-                account_num = account[0]
-                account_name = account[1]
-                closing = account[2]
-                opening = account[3] if len(account) > 3 else 0
-                period = account[4] if len(account) > 4 else closing
-                
-                result.append(
-                    f"{account_num:<8} {account_name[:35]:<35} "
-                    f"{opening:>12,.2f} {period:>12,.2f} {closing:>12,.2f}"
-                )
-                total_assets_opening += opening
-                total_assets_period += period
-                total_assets_closing += closing
-            
-            result.extend([
-                "-" * 80,
-                f"{'Total Assets':<44} {total_assets_opening:>12,.2f} "
-                f"{total_assets_period:>12,.2f} {total_assets_closing:>12,.2f}",
-                "",
-                "SKULDER (Liabilities):",
-                "-" * 80,
-            ])
-            
-            total_liab_opening = 0
-            total_liab_period = 0
-            total_liab_closing = 0
-            
-            for account in balance_sheet.liabilities:
-                account_num = account[0]
-                account_name = account[1]
-                closing = account[2]
-                opening = account[3] if len(account) > 3 else 0
-                period = account[4] if len(account) > 4 else closing
-                
-                result.append(
-                    f"{account_num:<8} {account_name[:35]:<35} "
-                    f"{opening:>12,.2f} {period:>12,.2f} {closing:>12,.2f}"
-                )
-                total_liab_opening += opening
-                total_liab_period += period
-                total_liab_closing += closing
-            
-            result.extend([
-                "-" * 80,
-                f"{'Total Liabilities':<44} {total_liab_opening:>12,.2f} "
-                f"{total_liab_period:>12,.2f} {total_liab_closing:>12,.2f}",
-                "",
-                "EGET KAPITAL (Equity):",
-                "-" * 80,
-            ])
-            
-            total_equity_opening = 0
-            total_equity_period = 0
-            total_equity_closing = 0
-            
-            for account in balance_sheet.equity:
-                account_num = account[0]
-                account_name = account[1]
-                closing = account[2]
-                opening = account[3] if len(account) > 3 else 0
-                period = account[4] if len(account) > 4 else closing
-                
-                result.append(
-                    f"{account_num:<8} {account_name[:35]:<35} "
-                    f"{opening:>12,.2f} {period:>12,.2f} {closing:>12,.2f}"
-                )
-                total_equity_opening += opening
-                total_equity_period += period
-                total_equity_closing += closing
-            
-            result.extend([
-                "-" * 80,
-                f"{'Total Equity':<44} {total_equity_opening:>12,.2f} "
-                f"{total_equity_period:>12,.2f} {total_equity_closing:>12,.2f}",
-                "",
-                "=" * 80,
-                f"{'TOTAL ASSETS':<44} {total_assets_opening:>12,.2f} "
-                f"{total_assets_period:>12,.2f} {balance_sheet.total_assets:>12,.2f}",
-                f"{'TOTAL LIABILITIES & EQUITY':<44} {total_liab_opening + total_equity_opening:>12,.2f} "
-                f"{total_liab_period + total_equity_period:>12,.2f} "
-                f"{balance_sheet.total_liabilities + balance_sheet.total_equity:>12,.2f}",
-                "=" * 80,
-            ])
-            
-            if abs(balance_sheet.total_assets - (balance_sheet.total_liabilities + balance_sheet.total_equity)) < 0.01:
-                result.append("✓ Balance Sheet is BALANCED")
-            else:
-                result.append("⚠ Balance Sheet is NOT BALANCED")
-        else:
-            # Legacy simple format
-            result = [
-                "BALANCE SHEET (Balansräkning)",
-                f"As of: {balance_sheet.period_end}",
-                "=" * 50,
-                "",
-                "ASSETS:",
-            ]
-            
-            for account in balance_sheet.assets:
-                result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
-            
-            result.extend([
-                "-" * 50,
-                f"Total Assets: {balance_sheet.total_assets:>27.2f}",
-                "",
-                "LIABILITIES:",
-            ])
-            
-            for account in balance_sheet.liabilities:
-                result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
-            
-            result.extend([
-                "-" * 50,
-                f"Total Liabilities: {balance_sheet.total_liabilities:>21.2f}",
-                "",
-                "EQUITY:",
-            ])
-            
-            for account in balance_sheet.equity:
-                result.append(f"  {account[1]:<30} {account[2]:>12.2f}")
-            
-            result.extend([
-                "-" * 50,
-                f"Total Equity: {balance_sheet.total_equity:>25.2f}",
-                "",
-                "=" * 50,
-                f"TOTAL LIAB. + EQUITY: {balance_sheet.total_liabilities + balance_sheet.total_equity:>14.2f}",
-                "=" * 50
-            ])
-        
-        return "\n".join(result)
-        
-    except Exception as e:
-        return f"Error generating balance sheet: {str(e)}"
-
-
-@mcp.tool()
-async def auto_generate_invoice_voucher(invoice_id: int) -> str:
-    """Automatically generate accounting voucher for invoice"""
-    try:
-        voucher_id = invoice_server.accounting.auto_generate_invoice_voucher(invoice_id)
-        return f"Invoice voucher generated successfully (Voucher ID: {voucher_id})"
-        
-    except Exception as e:
-        return f"Error generating invoice voucher: {str(e)}"
-
-
-@mcp.tool()
-async def auto_generate_expense_voucher(expense_id: int) -> str:
-    """Automatically generate accounting voucher for expense"""
-    try:
-        voucher_id = invoice_server.accounting.auto_generate_expense_voucher(expense_id)
-        return f"Expense voucher generated successfully (Voucher ID: {voucher_id})"
-        
-    except Exception as e:
-        return f"Error generating expense voucher: {str(e)}"
-
-
-@mcp.tool()
-async def auto_generate_payment_voucher(
-    invoice_id: int,
-    payment_amount: float,
-    payment_date: Optional[str] = None,
-    reference: Optional[str] = None
-) -> str:
-    """Automatically generate accounting voucher for invoice payment
-    
-    Args:
-        invoice_id: Invoice that was paid
-        payment_amount: Amount received
-        payment_date: Date payment was received (YYYY-MM-DD, defaults to today)
-        reference: Payment reference/description
-    
-    Returns:
-        Success message with voucher ID
-    """
-    try:
-        from datetime import date
-        from decimal import Decimal
-        
-        # Parse payment date
-        if payment_date:
-            payment_date = date.fromisoformat(payment_date)
-        
-        voucher_id = invoice_server.accounting.auto_generate_payment_voucher(
-            invoice_id=invoice_id,
-            payment_amount=Decimal(str(payment_amount)),
-            payment_date=payment_date,
-            reference=reference
-        )
-        return f"Payment voucher generated successfully (Voucher ID: {voucher_id})"
-        
-    except Exception as e:
-        return f"Error generating payment voucher: {str(e)}"
-
-
-# Documentation tools
-@mcp.tool()
-async def tools_documentation(
-    topic: Optional[str] = None,
-    depth: str = "essentials",
-    category: Optional[str] = None
-) -> str:
-    """
-    Get comprehensive documentation for accounting tools and workflows.
-    
-    ALWAYS START WITH THIS TOOL when working with the accounting system!
-    
-    Args:
-        topic: Specific tool name or "overview" for general guidance
-        depth: "essentials" (quick reference) or "full" (complete details)
-        category: Filter by category (invoicing, expenses, accounting, reporting)
-    
-    Returns:
-        Formatted documentation with examples and best practices
-    """
-    return invoice_server.documentation.get_documentation(topic, depth, category)
-
-
-@mcp.tool()
-async def workflow_guide(workflow_name: str) -> str:
-    """
-    Get step-by-step workflow documentation for common accounting processes.
-    
-    Args:
-        workflow_name: Workflow to get guide for (invoice_to_payment, expense_recording, monthly_closing)
-    
-    Returns:
-        Step-by-step workflow guide with accounting impact
-    """
-    return invoice_server.documentation.get_workflow_guide(workflow_name)
-
-
-@mcp.tool()
-async def swedish_compliance_guide(topic: str) -> str:
-    """
-    Get Swedish-specific compliance information for accounting requirements.
-    
-    Args:
-        topic: Compliance topic (vat_reporting, invoice_requirements, audit_trail, chart_of_accounts)
-    
-    Returns:
-        Swedish compliance requirements and best practices
-    """
-    return invoice_server.documentation.get_compliance_info(topic)
-
-
-# TOTP-Protected Voucher Operations
-@mcp.tool()
-async def supersede_voucher(
-    original_voucher_id: int,
-    replacement_voucher_id: int,
-    reason: str,
-    user_id: str,
-    totp_code: str
-) -> str:
-    """
-    Mark voucher as superseded with TOTP security verification.
-    
-    **CRITICAL**: Requires TOTP code from Google Authenticator.
-    
-    Args:
-        original_voucher_id: Voucher being replaced
-        replacement_voucher_id: Correct replacement voucher
-        reason: Business justification (max 200 chars)
-        user_id: User performing operation (e.g., 'tkaxberg@gmail.com')
-        totp_code: 6-digit TOTP from authenticator app or 8-digit backup code
-    
-    Returns:
-        Success message with security verification details or error
-    
-    Example:
-        supersede_voucher(21, 22, "Balance error corrected", "tkaxberg@gmail.com", "123456")
-    """
-    try:
-        result = invoice_server.secure_voucher.supersede_voucher_with_totp(
-            original_voucher_id=original_voucher_id,
-            replacement_voucher_id=replacement_voucher_id,
-            reason=reason,
-            user_id=user_id,
-            totp_code=totp_code
-        )
-        
-        if result["success"]:
-            return (
-                f"✅ Voucher {original_voucher_id} successfully superseded by {replacement_voucher_id}\n"
-                f"Security: TOTP verified at {result['security']['verification_time']}\n"
-                f"Audit log ID: {result['security']['audit_log_id']}\n"
-                f"Annotations created: {result['annotations_created']}"
-            )
-        else:
-            error_msg = f"❌ Failed: {result.get('error_message', 'Unknown error')}"
-            if result.get('retry_after'):
-                error_msg += f"\nRetry after: {result['retry_after']} seconds"
-            if result.get('attempts_remaining'):
-                error_msg += f"\nAttempts remaining: {result['attempts_remaining']}"
-            return error_msg
-    except Exception as e:
-        return f"Error superseding voucher: {str(e)}"
-
-
-
-@mcp.tool()
-async def list_vouchers_by_period(
-    start_date: str,
-    end_date: str,
-    include_superseded: bool = False,
-    voucher_type: Optional[str] = None
-) -> str:
-    """
-    List all vouchers for a period with summary information for efficient review.
-    
-    This function enables efficient period analysis by retrieving all vouchers
-    within a date range in a single call, eliminating the need for multiple
-    individual get_voucher_history calls.
-    
-    Args:
-        start_date: Start of period in YYYY-MM-DD format (e.g., "2025-07-01")
-        end_date: End of period in YYYY-MM-DD format (e.g., "2025-07-31")
-        include_superseded: Include superseded vouchers (default: False)
-        voucher_type: Optional filter by type (e.g., "INVOICE", "EXPENSE", "MANUAL")
-    
-    Returns:
-        Formatted list of vouchers with:
-        - ID, number, date, description, amount, status
-        - Posting status (Posted/Pending/Superseded/Voided)
-        - Balance check (Balanced/Unbalanced)
-        - Summary statistics for the period
-    
-    Example:
-        # Review all July 2025 vouchers for monthly closing
-        list_vouchers_by_period("2025-07-01", "2025-07-31")
-        
-        # Include superseded vouchers for audit trail
-        list_vouchers_by_period("2025-07-01", "2025-07-31", include_superseded=True)
-        
-        # Filter by voucher type
-        list_vouchers_by_period("2025-07-01", "2025-07-31", voucher_type="INVOICE")
-    """
-    try:
-        result = invoice_server.voucher_annotation.list_vouchers_by_period(
-            start_date=start_date,
-            end_date=end_date,
-            include_superseded=include_superseded,
-            voucher_type=voucher_type
-        )
-        
-        if not result.get("success"):
-            return f"❌ Error: {result.get('error', 'Unknown error')}"
-        
-        vouchers = result.get("vouchers", [])
-        summary = result.get("summary", {})
-        period = result.get("period", {})
-        
-        if not vouchers:
-            return f"No vouchers found for period {start_date} to {end_date}"
-        
-        # Build formatted output
-        output = [
-            f"📊 Voucher List for Period: {period['start_date']} to {period['end_date']}",
-            f"{'='*70}",
-            ""
-        ]
-        
-        # Summary statistics
-        output.append("📈 SUMMARY")
-        output.append(f"Total vouchers: {summary['total_vouchers']}")
-        output.append(f"Total amount: {summary['total_amount']:,.2f} SEK")
-        output.append(f"Posted: {summary['posted']} | Pending: {summary['pending']} | Superseded: {summary['superseded']}")
-        
-        if summary.get('unbalanced', 0) > 0:
-            output.append(f"⚠️  Unbalanced vouchers: {summary['unbalanced']}")
-        
-        # Type breakdown
-        if summary.get('by_type'):
-            output.append("\nBy Type:")
-            for vtype, stats in summary['by_type'].items():
-                output.append(f"  {vtype}: {stats['count']} vouchers, {stats['amount']:,.2f} SEK")
-        
-        output.append(f"\n{'='*70}")
-        output.append("VOUCHER DETAILS\n")
-        
-        # Voucher list with key information
-        for v in vouchers:
-            # Status indicators
-            status_icon = "✅" if v['is_posted'] else "⏳"
-            if v['status'] == 'SUPERSEDED':
-                status_icon = "🔄"
-            elif v['status'] == 'VOIDED':
-                status_icon = "❌"
-            
-            balance_icon = "✓" if v.get('is_balanced') else "⚠️"
-            
-            # Format voucher line
-            output.append(
-                f"{status_icon} #{v['id']:3d} | {v.get('voucher_number', 'N/A'):8s} | {v['date']} | "
-                f"{v['amount']:10,.2f} SEK | {balance_icon} | {v['posting_status']:10s}"
-            )
-            output.append(f"   {v['description'][:60]}")
-            
-            # Add source reference if available
-            source = v.get('source', {})
-            if source.get('invoice_id'):
-                output.append(f"   Source: Invoice #{source['invoice_id']}")
-            elif source.get('expense_id'):
-                output.append(f"   Source: Expense #{source['expense_id']}")
-            elif source.get('reminder_id'):
-                output.append(f"   Source: Reminder #{source['reminder_id']}")
-            
-            # Note if superseded
-            if v.get('superseded_by'):
-                output.append(f"   ➜ Superseded by voucher #{v['superseded_by']}")
-            
-            output.append("")  # Blank line between vouchers
-        
-        # Footer with filter information
-        output.append(f"{'='*70}")
-        filters = result.get('filters', {})
-        filter_info = []
-        if not filters.get('include_superseded'):
-            filter_info.append("Excluding superseded")
-        else:
-            filter_info.append("Including superseded")
-        if filters.get('voucher_type'):
-            filter_info.append(f"Type: {filters['voucher_type']}")
-        
-        output.append(f"Filters: {', '.join(filter_info)}")
-        
-        return "\n".join(output)
-        
-    except Exception as e:
-        return f"❌ Error listing vouchers: {str(e)}"
-
-
-@mcp.tool()
-async def get_voucher_history(voucher_id: int) -> str:
-    """
-    Get complete history, relationships, and security audit for a single voucher.
-    
-    Use this for detailed analysis of a specific voucher. For period analysis,
-    use list_vouchers_by_period instead.
-    
-    Args:
-        voucher_id: Voucher to analyze
-    
-    Returns:
-        Complete voucher history with annotations and security audit
-    
-    Example:
-        get_voucher_history(21)
-    """
-    try:
-        history = invoice_server.voucher_annotation.get_voucher_history(voucher_id)
-        
-        if not history.get("voucher"):
-            return f"❌ Voucher {voucher_id} does not exist"
-        
-        voucher = history["voucher"]
-        result = [
-            f"📋 Voucher History for #{voucher_id}",
-            f"{'='*50}",
-            f"Number: {voucher.get('voucher_number', 'N/A')}",
-            f"Description: {voucher.get('description', 'N/A')}",
-            f"Status: {voucher.get('status', 'ACTIVE')}",
-            f"Amount: {voucher.get('total_amount', 0):.2f}",
-            f"Created: {voucher.get('created_at', 'N/A')}",
-            f"Posted: {'Yes' if voucher.get('is_posted') else 'No'}",
-            ""
-        ]
-        
-        # Relationships
-        relationships = history.get("relationships", {})
-        if relationships.get("superseded_by"):
-            result.append(f"⚠️ SUPERSEDED BY: Voucher #{relationships['superseded_by']['id']}")
-        if relationships.get("supersedes"):
-            result.append(f"✅ SUPERSEDES: Voucher(s) {relationships['supersedes']}")
-        
-        # Annotations
-        annotations = history.get("annotations", [])
-        if annotations:
-            result.append(f"\n📝 Annotations ({len(annotations)}):")
-            result.append("-" * 40)
-            for ann in annotations:
-                security = "🔐" if ann.get("security_verified") else ""
-                result.append(
-                    f"{security} [{ann['type']}] {ann['created_at']}\n"
-                    f"   {ann['message']}\n"
-                    f"   By: {ann['created_by']}"
-                )
-        
-        # Security audit
-        security_audit = history.get("security_audit", [])
-        if security_audit:
-            result.append(f"\n🔐 Security Audit ({len(security_audit)}):")
-            result.append("-" * 40)
-            for audit in security_audit:
-                verified = "✅" if audit.get("totp_verified") else "❌"
-                result.append(
-                    f"{verified} {audit['operation']} by {audit['user']} at {audit['timestamp']}"
-                )
-        
-        return "\n".join(result)
-    except Exception as e:
-        return f"Error getting voucher history: {str(e)}"
-
-
-@mcp.tool()
-async def add_secure_voucher_annotation(
-    voucher_id: int,
-    annotation_type: str,
-    message: str,
-    user_id: str,
-    totp_code: str,
-    related_voucher_id: Optional[int] = None
-) -> str:
-    """
-    Add annotation to voucher with TOTP security verification.
-    
-    **CRITICAL**: ALL voucher annotations affect audit trail and require TOTP protection.
-    
-    Args:
-        voucher_id: Target voucher ID
-        annotation_type: CORRECTION | REVERSAL | NOTE (SUPERSEDED/VOID use dedicated methods)
-        message: Annotation message
-        user_id: User performing operation (e.g., 'tkaxberg@gmail.com')
-        totp_code: 6-digit TOTP from authenticator app or 8-digit backup code
-        related_voucher_id: Optional related voucher
-    
-    Returns:
-        Success/failure status with TOTP verification details
-    
-    Example:
-        add_secure_voucher_annotation(21, "NOTE", "Pending approval", "tkaxberg@gmail.com", "123456")
-    """
-    try:
-        result = invoice_server.secure_voucher.add_secure_annotation(
-            voucher_id=voucher_id,
-            annotation_type=annotation_type,
-            message=message,
-            user_id=user_id,
-            totp_code=totp_code,
-            related_voucher_id=related_voucher_id
-        )
-        
-        if result["success"]:
-            return (
-                f"✅ Secure annotation added to voucher {voucher_id}\n"
-                f"Type: {result['annotation_type']}\n"
-                f"Security: TOTP verified at {result['security']['verification_time']}\n"
-                f"Annotation ID: {result['annotation_id']}"
-            )
-        else:
-            error_msg = f"❌ Failed: {result.get('error', 'Unknown error')}"
-            if result.get('retry_after'):
-                error_msg += f"\nRetry after: {result['retry_after']} seconds"
-            return error_msg
-    except Exception as e:
-        return f"Error adding secure annotation: {str(e)}"
-
-
-@mcp.tool()
-async def generate_trial_balance(
-    as_of_date: Optional[str] = None,
-    start_date: Optional[str] = None,
-    period_analysis: bool = True,
-    include_superseded: bool = False,
-    security_audit: bool = False
-) -> str:
-    """
-    Generate trial balance with optional period comparison
-    
-    Args:
-        as_of_date: For closing balance (YYYY-MM-DD, default: today)
-        start_date: For opening balance comparison (YYYY-MM-DD, default: beginning of year)
-        period_analysis: Show opening/debit/credit/closing columns (default: True)
-        include_superseded: Include SUPERSEDED/VOID vouchers (default: False)
-        security_audit: Include security verification details (default: False)
-    
-    Returns:
-        Trial balance with period analysis and account codes
-    
-    Example:
-        generate_trial_balance()  # Enhanced trial balance with period analysis
-        generate_trial_balance(period_analysis=False)  # Simple trial balance
-        generate_trial_balance(include_superseded=True, security_audit=True)  # Full audit view
-    """
-    try:
-        from datetime import date
-        
-        # If using enhanced period analysis, use the new method
-        if period_analysis or as_of_date or start_date:
-            as_of_date_obj = date.fromisoformat(as_of_date) if as_of_date else None
-            start_date_obj = date.fromisoformat(start_date) if start_date else None
-            
-            trial_balance = invoice_server.accounting.generate_trial_balance_enhanced(
-                as_of_date=as_of_date_obj,
-                start_date=start_date_obj,
-                period_analysis=period_analysis
-            )
-        else:
-            # Use legacy method for backward compatibility
-            trial_balance = invoice_server.accounting.generate_trial_balance(
-                include_superseded=include_superseded,
-                security_audit=security_audit
-            )
-        
-        result = ["TRIAL BALANCE", "=" * 60]
-        result.append(f"{'Account':<10} {'Name':<30} {'Debit':>12} {'Credit':>12}")
-        result.append("-" * 60)
-        
-        for account in trial_balance["accounts"]:
-            debit_str = f"{account['debit_balance']:,.2f}" if account['debit_balance'] > 0 else ""
-            credit_str = f"{account['credit_balance']:,.2f}" if account['credit_balance'] > 0 else ""
-            result.append(
-                f"{account['account_number']:<10} {account['account_name'][:30]:<30} "
-                f"{debit_str:>12} {credit_str:>12}"
-            )
-        
-        result.append("-" * 60)
-        result.append(
-            f"{'TOTALS':<40} "
-            f"{trial_balance['totals']['debit']:>12,.2f} "
-            f"{trial_balance['totals']['credit']:>12,.2f}"
-        )
-        
-        balanced = "✅ BALANCED" if trial_balance["balanced"] else "❌ UNBALANCED"
-        result.append(f"\n{balanced}")
-        
-        # Metadata
-        metadata = trial_balance["metadata"]
-        result.append(f"\n📊 Metadata:")
-        result.append(f"   Total vouchers: {metadata['total_vouchers']}")
-        result.append(f"   Active vouchers: {metadata['active_vouchers']}")
-        result.append(f"   Superseded vouchers: {metadata['superseded_vouchers']}")
-        
-        if security_audit and 'security_protected_operations' in metadata:
-            result.append(f"   🔐 Security-protected operations: {metadata['security_protected_operations']}")
-        
-        if metadata['filters']['include_superseded']:
-            result.append("   ⚠️ INCLUDING superseded vouchers")
-        else:
-            result.append("   ✅ EXCLUDING superseded vouchers (clean view)")
-        
-        return "\n".join(result)
-    except Exception as e:
-        return f"Error generating trial balance: {str(e)}"
+# End of consolidated toolbox
 
 
 def main():

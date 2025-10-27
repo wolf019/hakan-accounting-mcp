@@ -4,11 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-invoice-server"
-version = "0.2.0"
+version = "1.0.0"
 description = "MCP server for unified accounting system with Swedish compliance"
 authors = [{name = "Tom Axberg", email = "consulting@tomkaare.tech"}]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
     "weasyprint>=65.0",
@@ -64,9 +64,10 @@ target-version = ['py39']
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["."]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
+addopts = "-v --tb=short"
 
 # MCP Invoice Server configuration
 [tool.mcp-invoice-server]
